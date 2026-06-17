@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
@@ -43,6 +44,181 @@ import type { AgentFactory } from './types';
 import 'dotenv/config';
 
 const defaultPort = PLAYGROUND_SERVER_PORT;
+const MAX_INLINE_RESPONSE_CHARS = 8 * 1024 * 1024;
+const REPLAY_SCREENSHOT_TTL_MS = 30 * 60 * 1000;
+
+export type ReplayScreenshotEntry = {
+  mimeType: 'image/png' | 'image/jpeg';
+  body: Buffer;
+};
+
+function byteLengthOfJson(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stripLargeExecutionFieldsForResponse(
+  executionDump: ExecutionDump,
+): ExecutionDump {
+  return {
+    ...executionDump,
+    tasks: executionDump.tasks.map((task) => {
+      const { error, errorStack, executor, log, uiContext, ...restTask } = task;
+      const taskInfo = isPlainObject(log) ? log.taskInfo : undefined;
+      const searchArea =
+        isPlainObject(taskInfo) && taskInfo.searchArea
+          ? taskInfo.searchArea
+          : undefined;
+      return {
+        ...restTask,
+        ...(uiContext
+          ? {
+              uiContext: {
+                screenshot: uiContext.screenshot,
+                shotSize: uiContext.shotSize,
+                shrunkShotToLogicalRatio: uiContext.shrunkShotToLogicalRatio,
+                deprecatedDpr: uiContext.deprecatedDpr,
+                _isFrozen: uiContext._isFrozen,
+              },
+            }
+          : {}),
+        ...(searchArea
+          ? {
+              log: {
+                taskInfo: {
+                  searchArea,
+                },
+              },
+            }
+          : {}),
+      };
+    }),
+  } as ExecutionDump;
+}
+
+function responsePayloadTooLarge(value: unknown): boolean {
+  try {
+    return byteLengthOfJson(value) > MAX_INLINE_RESPONSE_CHARS;
+  } catch (error) {
+    if (error instanceof RangeError) return true;
+    throw error;
+  }
+}
+
+function shrinkExecutionDumpForResponse(
+  executionDump: ExecutionDump | null,
+): ExecutionDump | null {
+  if (!executionDump) return null;
+  if (!responsePayloadTooLarge(executionDump)) return executionDump;
+  return stripLargeExecutionFieldsForResponse(executionDump);
+}
+
+function imageUrlForReplayScreenshot(
+  req: Request,
+  requestId: string,
+  imageId: string,
+): string {
+  const forwardedProto = req.header('x-forwarded-proto')?.split(',')[0]?.trim();
+  const protocol = forwardedProto || req.protocol || 'http';
+  const host = req.get('host') || `127.0.0.1:${defaultPort}`;
+  return `${protocol}://${host}/replay-screenshot/${encodeURIComponent(
+    requestId,
+  )}/${encodeURIComponent(imageId)}`;
+}
+
+function parseScreenshotData(imageData: string): ReplayScreenshotEntry | null {
+  if (/^https?:\/\//.test(imageData) || imageData.startsWith('/')) {
+    return null;
+  }
+
+  const dataUrlMatch = /^data:(image\/(?:png|jpeg|jpg));base64,(.*)$/i.exec(
+    imageData,
+  );
+  if (dataUrlMatch) {
+    const mimeType =
+      dataUrlMatch[1].toLowerCase() === 'image/jpeg' ||
+      dataUrlMatch[1].toLowerCase() === 'image/jpg'
+        ? 'image/jpeg'
+        : 'image/png';
+    return {
+      mimeType,
+      body: Buffer.from(dataUrlMatch[2], 'base64'),
+    };
+  }
+
+  return {
+    mimeType: 'image/png',
+    body: Buffer.from(imageData, 'base64'),
+  };
+}
+
+function replayScreenshotId(entry: ReplayScreenshotEntry): string {
+  return createHash('sha256')
+    .update(entry.mimeType)
+    .update(entry.body)
+    .digest('hex')
+    .slice(0, 24);
+}
+
+export function replaceReplayScreenshotsWithUrls(
+  executionDump: ExecutionDump,
+  urlForImage: (imageId: string) => string,
+): {
+  dump: ExecutionDump;
+  images: Map<string, ReplayScreenshotEntry>;
+} {
+  const images = new Map<string, ReplayScreenshotEntry>();
+  const convertScreenshot = (screenshot: unknown): unknown => {
+    const base64 =
+      typeof screenshot === 'string'
+        ? screenshot
+        : isPlainObject(screenshot) && typeof screenshot.base64 === 'string'
+          ? screenshot.base64
+          : null;
+    if (!base64) {
+      return screenshot;
+    }
+
+    const entry = parseScreenshotData(base64);
+    if (!entry) {
+      return screenshot;
+    }
+
+    const imageId = replayScreenshotId(entry);
+    images.set(imageId, entry);
+    const capturedAt =
+      isPlainObject(screenshot) && typeof screenshot.capturedAt === 'number'
+        ? screenshot.capturedAt
+        : undefined;
+    return {
+      base64: urlForImage(imageId),
+      ...(capturedAt ? { capturedAt } : {}),
+    };
+  };
+
+  return {
+    images,
+    dump: {
+      ...executionDump,
+      tasks: executionDump.tasks.map((task) => ({
+        ...task,
+        uiContext: task.uiContext
+          ? {
+              ...task.uiContext,
+              screenshot: convertScreenshot(task.uiContext.screenshot),
+            }
+          : task.uiContext,
+        recorder: task.recorder?.map((item) => ({
+          ...item,
+          screenshot: convertScreenshot(item.screenshot),
+        })),
+      })),
+    } as ExecutionDump,
+  };
+}
 
 function serializeAiConfigSignature(aiConfig: Record<string, unknown>): string {
   return JSON.stringify(
@@ -348,6 +524,13 @@ class PlaygroundServer {
   port?: number | null;
   staticPath: string;
   taskExecutionDumps: Record<string, ExecutionDump | null>; // Store execution dumps directly
+  replayScreenshotStores: Record<
+    string,
+    {
+      expiresAt: number;
+      images: Map<string, ReplayScreenshotEntry>;
+    }
+  >;
   id: string; // Unique identifier for this server instance
 
   /**
@@ -378,6 +561,7 @@ class PlaygroundServer {
 
   // Track current running task
   private currentTaskId: string | null = null;
+  private currentTaskAbortController: AbortController | null = null;
 
   // Flag to pause MJPEG polling during agent recreation or task execution
   private _agentReady = true;
@@ -426,6 +610,7 @@ class PlaygroundServer {
     this.tmpDir = getTmpDir()!;
     this.staticPath = staticPath;
     this.taskExecutionDumps = {}; // Initialize as empty object
+    this.replayScreenshotStores = {};
     // Use provided ID, or generate random UUID for each startup
     this.id = id || uuid();
 
@@ -495,7 +680,9 @@ class PlaygroundServer {
 
   private restoreBaseSessionState(): void {
     this.taskExecutionDumps = {};
+    this.replayScreenshotStores = {};
     this.currentTaskId = null;
+    this.currentTaskAbortController = null;
     this.sessionSetupState =
       this.sessionSetupState === 'blocked' ? 'blocked' : 'required';
     this._activeConnection = {
@@ -508,6 +695,67 @@ class PlaygroundServer {
     };
     this._mjpegHandler.reset();
     this.syncRuntimeState();
+  }
+
+  private cleanupExpiredReplayScreenshots(now = Date.now()): void {
+    for (const [requestId, store] of Object.entries(
+      this.replayScreenshotStores,
+    )) {
+      if (store.expiresAt <= now) {
+        delete this.replayScreenshotStores[requestId];
+      }
+    }
+  }
+
+  private storeReplayImages(
+    requestId: string,
+    images: Map<string, ReplayScreenshotEntry>,
+  ): void {
+    if (images.size === 0) {
+      return;
+    }
+    this.cleanupExpiredReplayScreenshots();
+
+    let store = this.replayScreenshotStores[requestId];
+    if (!store) {
+      store = {
+        expiresAt: Date.now() + REPLAY_SCREENSHOT_TTL_MS,
+        images: new Map<string, ReplayScreenshotEntry>(),
+      };
+      this.replayScreenshotStores[requestId] = store;
+    }
+    store.expiresAt = Date.now() + REPLAY_SCREENSHOT_TTL_MS;
+
+    for (const [id, entry] of images) {
+      if (!store.images.has(id)) {
+        store.images.set(id, entry);
+      }
+    }
+  }
+
+  private prepareExecutionDumpForReplayResponse(
+    executionDump: ExecutionDump | null,
+    requestId: string | undefined,
+    req: Request,
+  ): ExecutionDump | null {
+    if (!executionDump || !requestId) {
+      return shrinkExecutionDumpForResponse(executionDump);
+    }
+
+    const dump = shrinkExecutionDumpForResponse(executionDump);
+    if (!dump) {
+      return null;
+    }
+
+    const replay = replaceReplayScreenshotsWithUrls(dump, (imageId) =>
+      imageUrlForReplayScreenshot(req, requestId, imageId),
+    );
+    this.storeReplayImages(requestId, replay.images);
+    const replayDump = replay.dump;
+
+    return responsePayloadTooLarge(replayDump)
+      ? stripLargeExecutionFieldsForResponse(replayDump)
+      : replayDump;
   }
 
   setPreparedPlatform(
@@ -1123,11 +1371,31 @@ class PlaygroundServer {
       '/task-progress/:requestId',
       async (req: Request, res: Response) => {
         const { requestId } = req.params;
-        const executionDump = this.taskExecutionDumps[requestId] || null;
+        const executionDump = shrinkExecutionDumpForResponse(
+          this.taskExecutionDumps[requestId] || null,
+        );
 
         res.json({
           executionDump,
         });
+      },
+    );
+
+    this._app.get(
+      '/replay-screenshot/:requestId/:imageId',
+      (req: Request, res: Response) => {
+        const { requestId, imageId } = req.params;
+        this.cleanupExpiredReplayScreenshots();
+
+        const entry =
+          this.replayScreenshotStores[requestId]?.images.get(imageId);
+        if (!entry) {
+          return res.status(404).send('Replay screenshot not found');
+        }
+
+        res.setHeader('Content-Type', entry.mimeType);
+        res.setHeader('Cache-Control', 'private, max-age=1800');
+        res.send(entry.body);
       },
     );
 
@@ -1293,8 +1561,11 @@ class PlaygroundServer {
       }
 
       // Lock this task
+      let taskAbortController: AbortController | undefined;
       if (requestId) {
+        taskAbortController = new AbortController();
         this.currentTaskId = requestId;
+        this.currentTaskAbortController = taskAbortController;
         this.taskExecutionDumps[requestId] = null;
 
         // Use onDumpUpdate to receive and store executionDump directly
@@ -1337,6 +1608,7 @@ class PlaygroundServer {
         response.result = await executeAction(agent, type, actionSpace, value, {
           deepLocate,
           deepThink,
+          abortSignal: taskAbortController?.signal,
           screenshotIncluded,
           domIncluded,
           deviceOptions,
@@ -1352,18 +1624,28 @@ class PlaygroundServer {
       }
 
       try {
-        const dumpString = agent.dumpDataString({
-          inlineScreenshots: true,
-        });
-        if (dumpString) {
+        const requestDump = requestId
+          ? this.taskExecutionDumps[requestId] || null
+          : null;
+        if (requestDump) {
+          response.dump = this.prepareExecutionDumpForReplayResponse(
+            requestDump,
+            requestId,
+            req,
+          );
+        } else {
+          const dumpString = agent.dumpDataString({
+            inlineScreenshots: true,
+          });
           const groupedDump = ReportActionDump.fromSerializedString(dumpString);
           // Extract first execution from grouped dump, matching local execution adapter behavior
-          response.dump = groupedDump.executions?.[0] || null;
-        } else {
-          response.dump = null;
+          response.dump = this.prepareExecutionDumpForReplayResponse(
+            groupedDump.executions?.[0] || null,
+            requestId,
+            req,
+          );
         }
-        response.reportHTML =
-          agent.reportHTMLString({ inlineScreenshots: true }) || null;
+        response.reportHTML = null;
 
         agent.writeOutActionDumps();
         agent.resetDump();
@@ -1395,6 +1677,7 @@ class PlaygroundServer {
         // Release the lock
         if (this.currentTaskId === requestId) {
           this.currentTaskId = null;
+          this.currentTaskAbortController = null;
         }
       }
     });
@@ -1421,26 +1704,37 @@ class PlaygroundServer {
           }
 
           console.log(`Cancelling task: ${requestId}`);
+          this.currentTaskAbortController?.abort(
+            `Task ${requestId} was cancelled`,
+          );
 
           // Get current execution data before cancelling (dump and reportHTML)
           let dump: any = null;
           let reportHTML: string | null = null;
 
           try {
-            const dumpString = agent.dumpDataString?.({
-              inlineScreenshots: true,
-            });
-            if (dumpString) {
+            const requestDump = this.taskExecutionDumps[requestId] || null;
+            if (requestDump) {
+              dump = this.prepareExecutionDumpForReplayResponse(
+                requestDump,
+                requestId,
+                req,
+              );
+            } else {
+              const dumpString = agent.dumpDataString?.({
+                inlineScreenshots: true,
+              });
               const groupedDump =
                 ReportActionDump.fromSerializedString(dumpString);
               // Extract first execution from grouped dump
-              dump = groupedDump.executions?.[0] || null;
+              dump = this.prepareExecutionDumpForReplayResponse(
+                groupedDump.executions?.[0] || null,
+                requestId,
+                req,
+              );
             }
 
-            reportHTML =
-              agent.reportHTMLString?.({
-                inlineScreenshots: true,
-              }) || null;
+            reportHTML = null;
           } catch (error: unknown) {
             console.warn('Failed to get execution data before cancel:', error);
           }
@@ -1459,6 +1753,7 @@ class PlaygroundServer {
           // Clean up
           delete this.taskExecutionDumps[requestId];
           this.currentTaskId = null;
+          this.currentTaskAbortController = null;
 
           res.json({
             status: 'cancelled',

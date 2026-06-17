@@ -46,7 +46,10 @@ import {
   callAI,
   callAIWithObjectResponse,
 } from './service-caller/index';
-import { prepareModelImage } from './workflows/image-preprocess';
+import {
+  mapModelPixelBboxToSourcePixelBbox,
+  prepareModelImage,
+} from './workflows/image-preprocess';
 import {
   mergePixelBboxesToRect,
   pixelBboxToRect,
@@ -71,16 +74,21 @@ export {
   multimodalPromptToChatMessages as promptsToChatParam,
 } from '../common';
 
+const primaryLocateResultKeys = ['bbox', 'bbox_2d', 'point'];
+
+function hasNonEmptyLocateResultValue(value: unknown) {
+  return Array.isArray(value) ? value.length > 0 : value !== undefined;
+}
+
 function hasLocateResult(input: unknown, resultKey: string) {
   if (!input || typeof input !== 'object') {
     return false;
   }
 
   const record = input as Record<string, unknown>;
-  const locateResult = record[resultKey];
-  return Array.isArray(locateResult)
-    ? locateResult.length > 0
-    : locateResult !== undefined;
+  return [resultKey, ...primaryLocateResultKeys].some((key) =>
+    hasNonEmptyLocateResultValue(record[key]),
+  );
 }
 
 export async function buildSearchAreaConfig(options: {
@@ -241,12 +249,16 @@ export async function genericLocate(
 
   try {
     const mapping = options.searchConfig?.mapping;
-    const targetPixelBbox = resultAdapter.adaptElementLocateResultToPixelBbox(
+    const modelPixelBbox = resultAdapter.adaptElementLocateResultToPixelBbox(
       res.content,
       {
         preparedSize: preparedImage.preparedSize,
         contentSize: preparedImage.contentSize,
       },
+    );
+    const targetPixelBbox = mapModelPixelBboxToSourcePixelBbox(
+      modelPixelBbox,
+      preparedImage,
     );
     resRect = pixelBboxToRect(
       mapSearchAreaPixelBboxToOriginalPixelBbox(targetPixelBbox, mapping),
@@ -395,9 +407,16 @@ export async function AiLocateSection(options: {
         preparedSize: preparedImage.preparedSize,
         contentSize: preparedImage.contentSize,
       });
-    const mergedRect = mergePixelBboxesToRect([
+    const targetPixelBbox = mapModelPixelBboxToSourcePixelBbox(
       adaptedResult.target,
-      ...(adaptedResult.references ?? []),
+      preparedImage,
+    );
+    const referencePixelBboxes = adaptedResult.references?.map((reference) =>
+      mapModelPixelBboxToSourcePixelBbox(reference, preparedImage),
+    );
+    const mergedRect = mergePixelBboxesToRect([
+      targetPixelBbox,
+      ...(referencePixelBboxes ?? []),
     ]);
     debugSection('mergedRect %j', mergedRect);
 
@@ -461,6 +480,15 @@ export async function AiExtractElementInfo<T>(options: {
   const userContent: ChatCompletionUserMessageParam['content'] = [];
 
   if (extractOption?.screenshotIncluded !== false) {
+    const preparedScreenshot = await prepareModelImage({
+      imageBase64: screenshotBase64,
+      width: context.shotSize.width,
+      height: context.shotSize.height,
+      policy: {
+        maxLongSide: modelRuntime.adapter.imagePreprocess.maxLongSide,
+      },
+    });
+
     userContent.push({
       type: 'text',
       text: 'This is the current screenshot to evaluate. Unless <DATA_DEMAND> explicitly asks for comparison or matching against reference images, base your answer on this screenshot and its contents when provided.',
@@ -469,7 +497,7 @@ export async function AiExtractElementInfo<T>(options: {
     userContent.push({
       type: 'image_url',
       image_url: {
-        url: screenshotBase64,
+        url: preparedScreenshot.imageBase64,
         detail: 'high',
       },
     });

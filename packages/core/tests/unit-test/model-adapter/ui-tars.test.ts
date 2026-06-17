@@ -55,6 +55,10 @@ describe('ui-tars model adapter', () => {
     expect(uiTarsAdapter.planning.cacheEnabled).toBe(false);
     expect(uiTarsAdapter.planning.defaultReplanningCycleLimit).toBe(40);
     expect(uiTarsAdapter.planning.supportsActionDeepLocate).toBe(false);
+    expect(uiTarsAdapter.imagePreprocess).toEqual({
+      maxLongSide: false,
+      padBlockSize: undefined,
+    });
   });
 
   it('repairs bbox coordinate strings for locate-like json parser sources', () => {

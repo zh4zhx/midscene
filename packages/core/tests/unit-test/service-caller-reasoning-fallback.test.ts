@@ -68,6 +68,33 @@ describe('service-caller reasoning fallback', () => {
     expect(response.reasoning_content).toContain('POI RichInfo tab');
   });
 
+  it('uses reasoning when content is empty and reasoning_content is absent', async () => {
+    mockCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: '',
+            reasoning:
+              '<action-type>Tap</action-type><action-param-json>{"locate":{"prompt":"导出至创意黄色按钮"}}</action-param-json>',
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 20,
+        total_tokens: 30,
+      },
+    });
+
+    const response = await callAI(
+      [{ role: 'user', content: 'next action' }],
+      getModelRuntime(baseModelConfig),
+    );
+
+    expect(response.content).toContain('<action-type>Tap</action-type>');
+    expect(response.reasoning_content).toContain('导出至创意黄色按钮');
+  });
+
   it('parses object responses from reasoning_content when content is blank', async () => {
     mockCreate.mockResolvedValue({
       choices: [

@@ -12,6 +12,7 @@ import {
   callAIWithObjectResponse,
 } from '@/ai-model/service-caller';
 import type { AIArgs } from '@/ai-model/types';
+import { prepareModelImage } from '@/ai-model/workflows/image-preprocess';
 import type { SearchAreaConfig } from '@/ai-model/workflows/inspect/types';
 import { expandSearchArea } from '@/common';
 import type {
@@ -409,6 +410,7 @@ export default class Service {
       ],
       borderThickness: 3,
     });
+    let imageSize = shotSize;
 
     if (opt?.deepLocate) {
       const searchArea = expandSearchArea(targetRect, shotSize);
@@ -422,7 +424,21 @@ export default class Service {
       debug('describe: cropping to searchArea', searchArea);
       const croppedResult = await cropByRect(imagePayload, searchArea);
       imagePayload = croppedResult.imageBase64;
+      imageSize = {
+        width: croppedResult.width,
+        height: croppedResult.height,
+      };
     }
+
+    const preparedImage = await prepareModelImage({
+      imageBase64: imagePayload,
+      width: imageSize.width,
+      height: imageSize.height,
+      policy: {
+        maxLongSide: modelRuntime.adapter.imagePreprocess.maxLongSide,
+      },
+    });
+    imagePayload = preparedImage.imageBase64;
 
     const msgs: AIArgs = [
       { role: 'system', content: systemPrompt },

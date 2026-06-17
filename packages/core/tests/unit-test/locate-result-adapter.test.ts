@@ -73,6 +73,19 @@ describe('createLocateResultAdapter', () => {
     expect(adapter.promptSpec.exampleValues[1]).toEqual([402, 463]);
   });
 
+  it('falls back to point semantics when a bbox adapter receives point output', () => {
+    const adapter = createLocateResultAdapter({
+      coordinates: { shape: 'bbox', order: 'xy', normalizedBy: 1000 },
+    });
+
+    expect(
+      adapter.adaptElementLocateResultToPixelBbox(
+        { point: [500, 250] },
+        locateCtx(200, 100),
+      ),
+    ).toEqual([100, 25, 100, 25]);
+  });
+
   it('supports normalized yx point responses with the default point fallback', () => {
     const adapter = createLocateResultAdapter({
       coordinates: { shape: 'point', order: 'yx', normalizedBy: 1000 },

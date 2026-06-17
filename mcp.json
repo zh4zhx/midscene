@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "kbgraph": {
+      "type": "http",
+      "url": "https://pixelhub-kb-api.truesightai.com/mcp/v1/jsonrpc",
+      "tool": "wiki_search",
+      "headers": {
+        "Authorization": "Bearer kbk-5ebb4071b489c1d0f59a16ebf8fb457e6031b4fd201bf207ea676a2063949cdc"
+      }
+    }
+  }
+}

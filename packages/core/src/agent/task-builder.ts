@@ -460,6 +460,14 @@ export class TaskBuilder {
         const planLocatedElement = paramWithLocatedPixelBbox
           ? matchElementFromPlan(paramWithLocatedPixelBbox)
           : undefined;
+        if (paramWithLocatedPixelBbox) {
+          debug('locate received planning locatedPixelBbox: %o', {
+            prompt: param.prompt,
+            locatedPixelBbox: paramWithLocatedPixelBbox.locatedPixelBbox,
+            deepLocate: param.deepLocate === true,
+            planLocatedElement,
+          });
+        }
 
         // from locatedPixelBbox (direct plan hit)
         // when deepLocate is enabled, locatedPixelBbox should be used as search
@@ -468,6 +476,23 @@ export class TaskBuilder {
           ? undefined
           : planLocatedElement;
         const isPlanDirectHit = !!elementFromPlan;
+        if (isPlanDirectHit) {
+          debug('locate uses planning locatedPixelBbox directly: %o', {
+            prompt: param.prompt,
+            locatedPixelBbox: paramWithLocatedPixelBbox?.locatedPixelBbox,
+            center: elementFromPlan.center,
+            rect: elementFromPlan.rect,
+          });
+        } else if (param.deepLocate && planLocatedElement) {
+          debug(
+            'locate keeps planning locatedPixelBbox as deepLocate search area hint: %o',
+            {
+              prompt: param.prompt,
+              locatedPixelBbox: paramWithLocatedPixelBbox?.locatedPixelBbox,
+              searchArea: planLocatedElement.rect,
+            },
+          );
+        }
 
         // from xpath
         let rectFromXpath: Rect | undefined;
@@ -679,6 +704,14 @@ export class TaskBuilder {
             },
           };
         }
+        debug('locate resolved element: %o', {
+          prompt: param.prompt,
+          hitBy: hitBy?.from || 'AI Locate',
+          center: element.center,
+          rect: element.rect,
+          usedPlanningLocatedPixelBbox: isPlanDirectHit,
+          deepLocate: param.deepLocate === true,
+        });
 
         onResult?.(element);
 

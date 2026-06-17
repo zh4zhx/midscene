@@ -77,10 +77,17 @@ function resolveChatCompletion(
   };
 }
 
+function usesCustomImageFlow(config: ModelAdapterDefinition): boolean {
+  return config.planning?.kind === 'custom' || config.locate?.kind === 'custom';
+}
+
 function resolveImagePreprocess(
-  imagePreprocess: ModelAdapterDefinition['imagePreprocess'],
+  config: ModelAdapterDefinition,
 ): ImagePreprocessPolicy {
+  const { imagePreprocess } = config;
+  const defaultMaxLongSide = usesCustomImageFlow(config) ? false : 1920;
   return {
+    maxLongSide: imagePreprocess?.maxLongSide ?? defaultMaxLongSide,
     padBlockSize: imagePreprocess?.padBlockSize,
   };
 }
@@ -138,7 +145,7 @@ export class ResolvedModelAdapter implements ModelAdapter {
   constructor(config: ModelAdapterDefinition, modelFamily: string) {
     this.jsonParser = resolveJsonParser(config.jsonParser);
     this.chatCompletion = resolveChatCompletion(config.chatCompletion);
-    this.imagePreprocess = resolveImagePreprocess(config.imagePreprocess);
+    this.imagePreprocess = resolveImagePreprocess(config);
     this.planning = resolvePlanning(config.planning);
     this.locate = resolveLocate(config.locate);
   }

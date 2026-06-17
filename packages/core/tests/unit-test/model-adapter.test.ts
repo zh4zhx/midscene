@@ -87,7 +87,10 @@ describe('ResolvedModelAdapter', () => {
       config: { temperature: 0.7 },
     });
     expect(adapter.chatCompletion.resolveImageDetail({})).toBeUndefined();
-    expect(adapter.imagePreprocess).toEqual({});
+    expect(adapter.imagePreprocess).toEqual({
+      maxLongSide: 1920,
+      padBlockSize: undefined,
+    });
     expect(adapter.planning).toMatchObject({
       kind: 'standard',
       cacheEnabled: true,
@@ -135,6 +138,10 @@ describe('ResolvedModelAdapter', () => {
       kind: 'custom',
       supportsSearchArea: false,
     });
+    expect(adapter.imagePreprocess).toEqual({
+      maxLongSide: false,
+      padBlockSize: undefined,
+    });
     if (
       adapter.planning.kind !== 'custom' ||
       adapter.locate.kind !== 'custom'
@@ -167,6 +174,26 @@ describe('ResolvedModelAdapter', () => {
       supportsActionDeepLocate: false,
     });
     expect(adapter.locate.supportsSearchArea).toBe(false);
+    expect(adapter.imagePreprocess).toEqual({
+      maxLongSide: 1920,
+      padBlockSize: undefined,
+    });
+  });
+
+  it('allows adapters to disable default image resizing explicitly', () => {
+    const adapter = new ResolvedModelAdapter(
+      {
+        imagePreprocess: {
+          maxLongSide: false,
+        },
+      },
+      'test-disable-image-resize',
+    );
+
+    expect(adapter.imagePreprocess).toEqual({
+      maxLongSide: false,
+      padBlockSize: undefined,
+    });
   });
 
   it('throws for unknown json parser presets', () => {

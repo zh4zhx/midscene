@@ -33,6 +33,7 @@ export interface DeviceOptions {
 export interface ExecutionOptions {
   deepLocate?: boolean;
   deepThink?: boolean;
+  abortSignal?: AbortSignal;
   screenshotIncluded?: boolean;
   domIncluded?: boolean | 'visible-only';
   planningStrategy?: 'fast' | 'standard';

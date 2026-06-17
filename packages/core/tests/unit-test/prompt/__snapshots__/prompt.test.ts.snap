@@ -523,6 +523,11 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark it as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
 
+**Special case - Loading, waiting, or processing states:**
+- If the current screenshot shows a temporary in-progress state after a previous action (for example loading, waiting, processing, uploading, exporting, importing, generating, syncing, a spinner, progress bar, or a message such as "please wait"), the task is not failed yet.
+- In that situation, do NOT output <complete success="false"> just because the next required UI is not visible yet.
+- If a Sleep action is available, output a Sleep action to wait briefly, then observe the next screenshot and continue planning. Use <complete success="false"> only when the screenshot or history proves the task cannot continue, or the same unrecoverable state persists after repeated waits.
+
 ### Completion Criteria for Process-required Instructions
 
 If the user's instruction includes explicit operation steps, ordering requirements, or action requirements, it is a process-required instruction.
@@ -868,6 +873,11 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark it as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
 
+**Special case - Loading, waiting, or processing states:**
+- If the current screenshot shows a temporary in-progress state after a previous action (for example loading, waiting, processing, uploading, exporting, importing, generating, syncing, a spinner, progress bar, or a message such as "please wait"), the task is not failed yet.
+- In that situation, do NOT output <complete success="false"> just because the next required UI is not visible yet.
+- If a Sleep action is available, output a Sleep action to wait briefly, then observe the next screenshot and continue planning. Use <complete success="false"> only when the screenshot or history proves the task cannot continue, or the same unrecoverable state persists after repeated waits.
+
 ### Completion Criteria for Process-required Instructions
 
 If the user's instruction includes explicit operation steps, ordering requirements, or action requirements, it is a process-required instruction.
@@ -1180,6 +1190,11 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 **Special case - Assertion instructions:**
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark it as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
+
+**Special case - Loading, waiting, or processing states:**
+- If the current screenshot shows a temporary in-progress state after a previous action (for example loading, waiting, processing, uploading, exporting, importing, generating, syncing, a spinner, progress bar, or a message such as "please wait"), the task is not failed yet.
+- In that situation, do NOT output <complete success="false"> just because the next required UI is not visible yet.
+- If a Sleep action is available, output a Sleep action to wait briefly, then observe the next screenshot and continue planning. Use <complete success="false"> only when the screenshot or history proves the task cannot continue, or the same unrecoverable state persists after repeated waits.
 
 ### Completion Criteria for Process-required Instructions
 
@@ -1602,6 +1617,11 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark the goal as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
 
+**Special case - Loading, waiting, or processing states:**
+- If the current screenshot shows a temporary in-progress state after a previous action (for example loading, waiting, processing, uploading, exporting, importing, generating, syncing, a spinner, progress bar, or a message such as "please wait"), the task is not failed yet.
+- In that situation, do NOT output <complete success="false"> just because the next required UI is not visible yet.
+- If a Sleep action is available, output a Sleep action to wait briefly, then observe the next screenshot and continue planning. Use <complete success="false"> only when the screenshot or history proves the task cannot continue, or the same unrecoverable state persists after repeated waits.
+
 ### Completion Criteria for Process-required Instructions
 
 If the user's instruction includes explicit operation steps, ordering requirements, or action requirements, it is a process-required instruction.
@@ -1968,6 +1988,11 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark it as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
 
+**Special case - Loading, waiting, or processing states:**
+- If the current screenshot shows a temporary in-progress state after a previous action (for example loading, waiting, processing, uploading, exporting, importing, generating, syncing, a spinner, progress bar, or a message such as "please wait"), the task is not failed yet.
+- In that situation, do NOT output <complete success="false"> just because the next required UI is not visible yet.
+- If a Sleep action is available, output a Sleep action to wait briefly, then observe the next screenshot and continue planning. Use <complete success="false"> only when the screenshot or history proves the task cannot continue, or the same unrecoverable state persists after repeated waits.
+
 ### Completion Criteria for Process-required Instructions
 
 If the user's instruction includes explicit operation steps, ordering requirements, or action requirements, it is a process-required instruction.
@@ -2312,6 +2337,11 @@ The user's instruction defines the EXACT scope of what you must accomplish. You 
 **Special case - Assertion instructions:**
 - If the user's instruction includes an assertion (e.g., "verify that...", "check that...", "assert..."), and you observe from the screenshot that the assertion condition is NOT satisfied and cannot be satisfied, mark it as failed (success="false").
 - If the page is still loading (e.g., you see a loading spinner, skeleton screen, or progress bar), do NOT assert yet. Wait for the page to finish loading before evaluating the assertion.
+
+**Special case - Loading, waiting, or processing states:**
+- If the current screenshot shows a temporary in-progress state after a previous action (for example loading, waiting, processing, uploading, exporting, importing, generating, syncing, a spinner, progress bar, or a message such as "please wait"), the task is not failed yet.
+- In that situation, do NOT output <complete success="false"> just because the next required UI is not visible yet.
+- If a Sleep action is available, output a Sleep action to wait briefly, then observe the next screenshot and continue planning. Use <complete success="false"> only when the screenshot or history proves the task cannot continue, or the same unrecoverable state persists after repeated waits.
 
 ### Completion Criteria for Process-required Instructions
 

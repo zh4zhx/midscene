@@ -56,9 +56,13 @@ describe('qwen model adapter', () => {
 
   it('keeps model-specific image preprocess policy in the adapter', () => {
     expect(qwen25Adapter.imagePreprocess).toEqual({
+      maxLongSide: 1920,
       padBlockSize: 28,
     });
-    expect(qwen3VlAdapter.imagePreprocess).toEqual({});
+    expect(qwen3VlAdapter.imagePreprocess).toEqual({
+      maxLongSide: 1920,
+      padBlockSize: undefined,
+    });
     expect(qwen25Adapter.chatCompletion.unsupportedUserConfig).toEqual([
       'reasoningEnabled',
       'reasoningEffort',

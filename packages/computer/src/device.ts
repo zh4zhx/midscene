@@ -9,6 +9,7 @@ import type {
   LocateResultElement,
   Size,
 } from '@midscene/core';
+import { getMidsceneLocationSchema, z } from '@midscene/core';
 import {
   type AbstractInterface,
   type ComputerInputPrimitives,
@@ -79,6 +80,29 @@ interface EdgeScrollStrategy {
   key: 'home' | 'end';
   libnut: readonly [number, number];
 }
+
+const computerTripleClickParamSchema = z.object({
+  locate: getMidsceneLocationSchema().describe('The element to triple click'),
+});
+
+const computerHotkeyClickParamSchema = z.object({
+  locate: getMidsceneLocationSchema().describe(
+    'The element to click while holding modifier keys',
+  ),
+  keyName: z
+    .string()
+    .describe(
+      "Modifier key or key combination to hold while clicking, e.g. 'shift' or 'command'",
+    ),
+});
+
+const computerOpenAppParamSchema = z.object({
+  appName: z.string().min(1).describe('Application name to open'),
+});
+
+const computerOpenUrlParamSchema = z.object({
+  url: z.string().min(1).describe('URL to open in the default browser'),
+});
 
 // Single source of truth for edge scroll dispatch. Adding a new scrollType
 // only requires one entry here; the three backends (phased binary /
@@ -168,6 +192,11 @@ function sendKeyViaAppleScript(key: string, modifiers: string[] = []): void {
   }
 
   debugDevice('sendKeyViaAppleScript', { key, modifiers, script });
+  execFileSync('osascript', ['-e', script]);
+}
+
+function runAppleScript(script: string): void {
+  debugDevice('runAppleScript', { script });
   execFileSync('osascript', ['-e', script]);
 }
 
@@ -412,6 +441,11 @@ export class ComputerDevice implements AbstractInterface {
       tap: async ({ x, y }) => {
         const targetX = Math.round(x);
         const targetY = Math.round(y);
+
+        debugDevice('Computer Tap', {
+          x: targetX,
+          y: targetY,
+        });
 
         await this.inputDriver.smoothMoveMouse(
           targetX,
@@ -855,6 +889,113 @@ Original error: ${lastRawMessage}`,
     this.inputDriver.sendKey(key, modifiers);
   }
 
+  private pointFromLocate(
+    locate: LocateResultElement | undefined,
+    missingMessage: string,
+  ): { x: number; y: number } {
+    if (!locate) {
+      throw new Error(missingMessage);
+    }
+    return { x: locate.center[0], y: locate.center[1] };
+  }
+
+  private async tripleClick(locate: LocateResultElement): Promise<void> {
+    const { x, y } = this.pointFromLocate(
+      locate,
+      'TripleClick requires an element to be located',
+    );
+    this.inputDriver.moveMouse(Math.round(x), Math.round(y));
+    for (let i = 0; i < 3; i++) {
+      this.inputDriver.mouseClick('left');
+      await this.inputDriver.delay(50);
+    }
+  }
+
+  private async hotkeyClick(
+    locate: LocateResultElement,
+    keyName: string,
+  ): Promise<void> {
+    const { x, y } = this.pointFromLocate(
+      locate,
+      'HotkeyClick requires an element to be located',
+    );
+
+    if (process.platform === 'darwin') {
+      const modifierNames = keyName
+        .split('+')
+        .map((key) => normalizeKeyName(key.trim()))
+        .filter(Boolean)
+        .map((key) => APPLESCRIPT_MODIFIER_MAP[key])
+        .filter(Boolean);
+
+      if (modifierNames.length > 0) {
+        const modifierClause = ` using {${modifierNames.join(', ')}}`;
+        try {
+          runAppleScript(
+            `tell application "System Events" to click at {${Math.round(
+              x,
+            )}, ${Math.round(y)}}${modifierClause}`,
+          );
+          await this.inputDriver.delay(50);
+          return;
+        } catch (error) {
+          debugDevice('modifier click via AppleScript failed, falling back', {
+            error,
+          });
+        }
+      }
+    }
+
+    this.inputDriver.moveMouse(Math.round(x), Math.round(y));
+    this.inputDriver.mouseClick('left');
+    await this.inputDriver.delay(50);
+    await this.pressKeyboardShortcut(keyName);
+  }
+
+  private async openApp(appName: string): Promise<void> {
+    const trimmed = appName.trim();
+    if (!trimmed) {
+      throw new Error('OpenApp requires appName');
+    }
+
+    if (process.platform === 'darwin') {
+      execFileSync('open', ['-a', trimmed]);
+      await this.inputDriver.delay(1000);
+      return;
+    }
+
+    if (process.platform === 'win32') {
+      execFileSync('cmd', ['/c', 'start', '', trimmed]);
+      await this.inputDriver.delay(1000);
+      return;
+    }
+
+    execFileSync('xdg-open', [trimmed]);
+    await this.inputDriver.delay(1000);
+  }
+
+  private async openUrl(url: string): Promise<void> {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      throw new Error('OpenUrl requires url');
+    }
+
+    if (process.platform === 'darwin') {
+      execFileSync('open', [trimmed]);
+      await this.inputDriver.delay(1000);
+      return;
+    }
+
+    if (process.platform === 'win32') {
+      execFileSync('cmd', ['/c', 'start', '', trimmed]);
+      await this.inputDriver.delay(1000);
+      return;
+    }
+
+    execFileSync('xdg-open', [trimmed]);
+    await this.inputDriver.delay(1000);
+  }
+
   private async performScroll(param: any): Promise<void> {
     if (param.locate) {
       const element = param.locate as LocateResultElement;
@@ -963,9 +1104,65 @@ Original error: ${lastRawMessage}`,
     ];
 
     const platformActions = Object.values(createPlatformActions());
+    const computerActions = [
+      defineAction({
+        name: 'TripleClick',
+        description: 'Triple click the element',
+        paramSchema: computerTripleClickParamSchema,
+        sample: {
+          locate: { prompt: 'the text line to select' },
+        },
+        call: async (param) => {
+          await this.tripleClick(param.locate as LocateResultElement);
+        },
+      }),
+      defineAction({
+        name: 'HotkeyClick',
+        description:
+          'Click the element, then press the requested modifier key or shortcut',
+        paramSchema: computerHotkeyClickParamSchema,
+        sample: {
+          locate: { prompt: 'the item to multi-select' },
+          keyName: 'shift',
+        },
+        call: async (param) => {
+          await this.hotkeyClick(
+            param.locate as LocateResultElement,
+            param.keyName as string,
+          );
+        },
+      }),
+      defineAction({
+        name: 'OpenApp',
+        description: 'Open an application by name',
+        paramSchema: computerOpenAppParamSchema,
+        sample: {
+          appName: 'Safari',
+        },
+        call: async (param) => {
+          await this.openApp(param.appName as string);
+        },
+      }),
+      defineAction({
+        name: 'OpenUrl',
+        description: 'Open a URL in the default browser',
+        paramSchema: computerOpenUrlParamSchema,
+        sample: {
+          url: 'https://example.com',
+        },
+        call: async (param) => {
+          await this.openUrl(param.url as string);
+        },
+      }),
+    ];
     const customActions = this.options?.customActions || [];
 
-    return [...defaultActions, ...platformActions, ...customActions];
+    return [
+      ...defaultActions,
+      ...platformActions,
+      ...computerActions,
+      ...customActions,
+    ];
   }
 
   async destroy(): Promise<void> {

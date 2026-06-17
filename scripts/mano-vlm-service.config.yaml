@@ -1,0 +1,15 @@
+model_name_or_path: /Users/test/.cache/modelscope/hub/models/Mininglamp2718/Mano-CUA-4B-Thinking-1.1-MLX-8bit
+
+w8a8:
+  mode: auto
+
+sampling:
+  temperature: 0.0
+  top_p: 1.0
+  max_new_tokens: 512
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  ttl: 1800
+  max_image_buffer_size: 2

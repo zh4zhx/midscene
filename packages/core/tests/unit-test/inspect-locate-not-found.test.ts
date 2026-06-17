@@ -15,6 +15,19 @@ vi.mock('@/ai-model/service-caller/index', async () => {
   };
 });
 
+vi.mock('@midscene/shared/img', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@midscene/shared/img')>();
+  return {
+    ...actual,
+    paddingToMatchBlockByBase64: vi.fn().mockResolvedValue({
+      imageBase64: 'padded-image',
+      width: 1008,
+      height: 672,
+    }),
+    resizeImgBase64: vi.fn().mockResolvedValue('resized-image'),
+  };
+});
+
 describe('locate not-found parsing', () => {
   const modelConfig: IModelConfig = {
     modelFamily: 'qwen2.5-vl',

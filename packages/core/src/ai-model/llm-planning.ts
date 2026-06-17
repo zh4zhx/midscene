@@ -16,7 +16,16 @@ import {
 } from './prompt/util';
 import { AIResponseParseError, callAI } from './service-caller/index';
 import type { JsonParser, JsonParserSource } from './service-caller/json';
-import { prepareModelImage } from './workflows/image-preprocess';
+import { finalizePixelBbox } from './shared/model-locate-result/bbox';
+import type {
+  LocateResultAdapter,
+  LocateResultContext,
+  PixelBbox,
+} from './shared/model-locate-result/types';
+import {
+  mapModelPixelBboxToSourcePixelBbox,
+  prepareModelImage,
+} from './workflows/image-preprocess';
 import type { PlanOptions } from './workflows/planning/types';
 
 const debug = getDebug('planning');
@@ -24,6 +33,111 @@ const warnLog = getDebug('planning', { console: true });
 
 const noPreviousActionsText =
   'No previous actions have been executed in this aiAct execution yet. If the instruction asks for actions, choose the first action to execute.';
+
+function isPlanningLocateParamWithPoint(
+  locateResult: unknown,
+): locateResult is { point: [number, number] } {
+  return (
+    locateResult !== null &&
+    typeof locateResult === 'object' &&
+    Array.isArray((locateResult as { point?: unknown }).point) &&
+    (locateResult as { point: unknown[] }).point.length >= 2
+  );
+}
+
+function isPixelBbox(value: unknown): value is PixelBbox {
+  return (
+    Array.isArray(value) &&
+    value.length === 4 &&
+    value.every((item) => typeof item === 'number' && Number.isFinite(item))
+  );
+}
+
+function isPlanningLocateParamWithLocatedPixelBbox(
+  locateResult: unknown,
+): locateResult is { locatedPixelBbox: PixelBbox } {
+  return (
+    locateResult !== null &&
+    typeof locateResult === 'object' &&
+    isPixelBbox(
+      (locateResult as { locatedPixelBbox?: unknown }).locatedPixelBbox,
+    )
+  );
+}
+
+function isPromptOnlyPlanningLocateParam(locateResult: unknown): boolean {
+  return (
+    locateResult !== null &&
+    typeof locateResult === 'object' &&
+    typeof (locateResult as { prompt?: unknown }).prompt === 'string' &&
+    !isPlanningLocateParamWithLocatedPixelBbox(locateResult) &&
+    !isPlanningLocateParamWithPoint(locateResult) &&
+    (locateResult as { bbox?: unknown }).bbox === undefined &&
+    (locateResult as { bbox_2d?: unknown }).bbox_2d === undefined &&
+    (locateResult as { point?: unknown }).point === undefined
+  );
+}
+
+function getPlanningLocatePrompt(locateResult: unknown): string | undefined {
+  if (!locateResult || typeof locateResult !== 'object') return undefined;
+
+  const prompt = (locateResult as { prompt?: unknown }).prompt;
+  if (typeof prompt === 'string') return prompt;
+  if (
+    prompt &&
+    typeof prompt === 'object' &&
+    typeof (prompt as { prompt?: unknown }).prompt === 'string'
+  ) {
+    return (prompt as { prompt: string }).prompt;
+  }
+  return undefined;
+}
+
+function getPlanningLocateCoordinateSource(locateResult: unknown): string {
+  if (isPlanningLocateParamWithLocatedPixelBbox(locateResult)) {
+    return 'locatedPixelBbox';
+  }
+  if (isPlanningLocateParamWithPoint(locateResult)) return 'point';
+  if (!locateResult || typeof locateResult !== 'object') return 'adapter';
+
+  const locateObject = locateResult as {
+    bbox?: unknown;
+    bbox_2d?: unknown;
+  };
+  if (Array.isArray(locateObject.bbox)) return 'bbox';
+  if (Array.isArray(locateObject.bbox_2d)) return 'bbox_2d';
+  return 'adapter';
+}
+
+function adaptPlanningLocateParamToPixelBbox(
+  locateResult: unknown,
+  locateResultAdapter: LocateResultAdapter,
+  ctx: LocateResultContext,
+): PixelBbox {
+  if (isPlanningLocateParamWithLocatedPixelBbox(locateResult)) {
+    return finalizePixelBbox(locateResult.locatedPixelBbox, locateResult, ctx);
+  }
+
+  if (isPlanningLocateParamWithPoint(locateResult)) {
+    const point: [number, number] = [
+      Number(locateResult.point[0]),
+      Number(locateResult.point[1]),
+    ];
+    const pixelPoint: [number, number] = [
+      Math.round((point[0] * Math.max(ctx.preparedSize.width - 1, 0)) / 1000),
+      Math.round((point[1] * Math.max(ctx.preparedSize.height - 1, 0)) / 1000),
+    ];
+    const pixelBbox: PixelBbox = [
+      pixelPoint[0],
+      pixelPoint[1],
+      pixelPoint[0],
+      pixelPoint[1],
+    ];
+    return finalizePixelBbox(pixelBbox, locateResult, ctx);
+  }
+
+  return locateResultAdapter.adaptPlanningParamToPixelBbox(locateResult, ctx);
+}
 
 /**
  * Parse XML response from LLM and convert to RawResponsePlanningAIResponse.
@@ -306,9 +420,27 @@ export async function plan(
       locateFields.forEach((field) => {
         const locateResult = action.param[field];
         if (locateResult) {
+          if (isPromptOnlyPlanningLocateParam(locateResult)) {
+            debug('planning locate kept prompt-only param: %o', {
+              actionType: type,
+              field,
+              prompt: getPlanningLocatePrompt(locateResult),
+            });
+            return;
+          }
+
           if (!opts.includeLocateInPlanning) {
             if (typeof locateResult === 'object') {
               // In prompt-only planning mode, ignore any accidental coordinates from the model.
+              debug(
+                'planning locate coordinates ignored because includeLocateInPlanning=false: %o',
+                {
+                  actionType: type,
+                  field,
+                  source: getPlanningLocateCoordinateSource(locateResult),
+                  prompt: getPlanningLocatePrompt(locateResult),
+                },
+              );
               action.param[field] = { prompt: locateResult.prompt };
             }
             return;
@@ -318,15 +450,29 @@ export async function plan(
             locateResultAdapter,
             'generic planning locate normalization requires a standard locate adapter',
           );
+          const modelPixelBbox = adaptPlanningLocateParamToPixelBbox(
+            locateResult,
+            locateResultAdapter,
+            {
+              preparedSize: preparedImage.preparedSize,
+              contentSize: preparedImage.contentSize,
+            },
+          );
+          const locatedPixelBbox = mapModelPixelBboxToSourcePixelBbox(
+            modelPixelBbox,
+            preparedImage,
+          );
+          debug('planning locate normalized to locatedPixelBbox: %o', {
+            actionType: type,
+            field,
+            source: getPlanningLocateCoordinateSource(locateResult),
+            prompt: getPlanningLocatePrompt(locateResult),
+            modelPixelBbox,
+            locatedPixelBbox,
+          });
           action.param[field] = {
             ...locateResult,
-            locatedPixelBbox: locateResultAdapter.adaptPlanningParamToPixelBbox(
-              locateResult,
-              {
-                preparedSize: preparedImage.preparedSize,
-                contentSize: preparedImage.contentSize,
-              },
-            ),
+            locatedPixelBbox,
           };
         }
       });

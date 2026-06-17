@@ -41,7 +41,10 @@ describe('gpt model adapter', () => {
         requiresOriginalImageDetail: true,
       }),
     ).toBe('original');
-    expect(gpt5Adapter.imagePreprocess).toEqual({});
+    expect(gpt5Adapter.imagePreprocess).toEqual({
+      maxLongSide: 1920,
+      padBlockSize: undefined,
+    });
   });
 
   it('omits token limit for gpt-5 when reasoning config is unset', () => {

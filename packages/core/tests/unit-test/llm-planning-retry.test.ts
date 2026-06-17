@@ -2,9 +2,11 @@ import { ConversationHistory } from '@/ai-model/conversation-history';
 import { plan } from '@/ai-model/llm-planning';
 import { getModelRuntime } from '@/ai-model/models';
 import { callAI } from '@/ai-model/service-caller/index';
+import { getMidsceneLocationSchema } from '@/common';
 import type { DeviceAction, UIContext } from '@/types';
 import type { IModelConfig } from '@midscene/shared/env';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 vi.mock('@/ai-model/service-caller/index', async (importOriginal) => {
   const actual =
@@ -12,6 +14,14 @@ vi.mock('@/ai-model/service-caller/index', async (importOriginal) => {
   return {
     ...actual,
     callAI: vi.fn(),
+  };
+});
+
+vi.mock('@midscene/shared/img', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@midscene/shared/img')>();
+  return {
+    ...actual,
+    resizeImgBase64: vi.fn().mockResolvedValue('resized-image'),
   };
 });
 
@@ -42,6 +52,17 @@ const mockActionSpace = (): DeviceAction[] => [
   {
     name: 'Tap',
     description: 'Tap an element',
+    call: vi.fn(),
+  },
+];
+
+const mockActionSpaceWithLocate = (): DeviceAction[] => [
+  {
+    name: 'Tap',
+    description: 'Tap an element',
+    paramSchema: z.object({
+      locate: getMidsceneLocationSchema(),
+    }),
     call: vi.fn(),
   },
 ];
@@ -138,5 +159,128 @@ describe('plan XML parse retry', () => {
 
     expect(latestImageDetail()).toBe('high');
     expect(latestCallAIOptions()?.requiresOriginalImageDetail).toBe(true);
+  });
+
+  it('maps planning point locate params into a one-pixel bbox', async () => {
+    vi.mocked(callAI).mockResolvedValueOnce(
+      mockAIResponse(`<log>Tap button</log>
+<action-type>Tap</action-type>
+<action-param-json>{"locate":{"prompt":"the target position","point":[500,250]}}</action-param-json>`),
+    );
+
+    const result = await plan('tap the button', {
+      context: {
+        ...mockContext(),
+        shotSize: {
+          width: 200,
+          height: 100,
+        },
+      },
+      actionSpace: mockActionSpaceWithLocate(),
+      modelRuntime: getModelRuntime({
+        ...mockModelConfig(),
+        modelFamily: 'qwen3-vl',
+      }),
+      conversationHistory: new ConversationHistory(),
+      includeLocateInPlanning: true,
+      deepThink: false,
+    });
+
+    expect(result.actions).toBeDefined();
+    const [action] = result.actions!;
+    expect(action).toMatchObject({
+      type: 'Tap',
+      param: {
+        locate: {
+          prompt: 'the target position',
+          point: [500, 250],
+          locatedPixelBbox: [100, 25, 100, 25],
+        },
+      },
+    });
+  });
+
+  it('keeps prompt-only locate params for follow-up locate tasks', async () => {
+    vi.mocked(callAI).mockResolvedValueOnce(
+      mockAIResponse(`<log>Scroll list</log>
+<action-type>Scroll</action-type>
+<action-param-json>{"direction":"down","scrollType":"singleAction","locate":{"prompt":"the weather style list area"}}</action-param-json>`),
+    );
+
+    const result = await plan('generate spring cherry blossoms', {
+      context: mockContext(),
+      actionSpace: [
+        {
+          name: 'Scroll',
+          description: 'Scroll an area',
+          paramSchema: z.object({
+            direction: z.enum(['down', 'up', 'left', 'right']),
+            scrollType: z.enum(['singleAction']),
+            locate: getMidsceneLocationSchema().optional(),
+          }),
+          call: vi.fn(),
+        },
+      ],
+      modelRuntime: getModelRuntime({
+        ...mockModelConfig(),
+        modelFamily: 'qwen3-vl',
+      }),
+      conversationHistory: new ConversationHistory(),
+      includeLocateInPlanning: true,
+      deepThink: false,
+    });
+
+    expect(result.actions).toBeDefined();
+    const [action] = result.actions!;
+    expect(action).toMatchObject({
+      type: 'Scroll',
+      param: {
+        direction: 'down',
+        scrollType: 'singleAction',
+        locate: {
+          prompt: 'the weather style list area',
+        },
+      },
+    });
+    expect(action.param.locate).not.toHaveProperty('locatedPixelBbox');
+  });
+
+  it('maps planning locate bbox from resized model image back to screenshot coordinates', async () => {
+    vi.mocked(callAI).mockResolvedValueOnce(
+      mockAIResponse(`<log>Tap button</log>
+<action-type>Tap</action-type>
+<action-param-json>{"locate":{"prompt":"the target","bbox":[0,0,1000,1000]}}</action-param-json>`),
+    );
+
+    const result = await plan('tap the button', {
+      context: {
+        ...mockContext(),
+        shotSize: {
+          width: 3024,
+          height: 1964,
+        },
+      },
+      actionSpace: mockActionSpaceWithLocate(),
+      modelRuntime: getModelRuntime({
+        ...mockModelConfig(),
+        modelFamily: 'qwen3-vl',
+      }),
+      conversationHistory: new ConversationHistory(),
+      includeLocateInPlanning: true,
+      deepThink: false,
+    });
+
+    expect(result.actions).toBeDefined();
+    const [action] = result.actions!;
+    expect(action).toMatchObject({
+      type: 'Tap',
+      param: {
+        locate: {
+          prompt: 'the target',
+          bbox: [0, 0, 1000, 1000],
+          locatedPixelBbox: [0, 0, 3023, 1963],
+        },
+      },
+    });
   });
 });

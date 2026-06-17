@@ -304,6 +304,25 @@ export async function callAI(
   const hasUsableText = (value: string | null | undefined): value is string =>
     typeof value === 'string' && value.trim().length > 0;
 
+  type ReasoningMessage = OpenAI.Chat.Completions.ChatCompletionMessage & {
+    reasoning?: unknown;
+    reasoning_content?: unknown;
+  };
+
+  const getReasoningText = (message: ReasoningMessage): string => {
+    const reasoningContent = message?.reasoning_content;
+    if (typeof reasoningContent === 'string') {
+      return reasoningContent;
+    }
+
+    const reasoning = message?.reasoning;
+    if (typeof reasoning === 'string') {
+      return reasoning;
+    }
+
+    return '';
+  };
+
   const buildUsageInfo = (
     usageData?: OpenAI.CompletionUsage,
     requestId?: string | null,
@@ -496,8 +515,7 @@ export async function callAI(
           }
 
           content = result.choices[0].message.content!;
-          accumulatedReasoning =
-            (result.choices[0].message as any)?.reasoning_content || '';
+          accumulatedReasoning = getReasoningText(result.choices[0].message);
           usage = result.usage;
           requestId = result._request_id;
 

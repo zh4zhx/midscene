@@ -25,12 +25,15 @@ vi.mock('@midscene/shared/img', async () => {
     preProcessImageUrl: vi
       .fn()
       .mockResolvedValue('data:image/png;base64,REFERENCE'),
+    resizeImgBase64: vi
+      .fn()
+      .mockResolvedValue('data:image/jpeg;base64,RESIZED'),
   };
 });
 
 import { callAI } from '@/ai-model/service-caller/index';
 import { AiExtractElementInfo } from '@/ai-model/workflows/inspect';
-import { preProcessImageUrl } from '@midscene/shared/img';
+import { preProcessImageUrl, resizeImgBase64 } from '@midscene/shared/img';
 
 describe('AiExtractElementInfo prompt assembly', () => {
   const modelConfig: IModelConfig = {
@@ -104,7 +107,7 @@ describe('AiExtractElementInfo prompt assembly', () => {
         expect.objectContaining({
           type: 'image_url',
           image_url: expect.objectContaining({
-            url: expect.stringMatching(/^data:image\/png;base64,/),
+            url: context.screenshot.base64,
           }),
         }),
         expect.objectContaining({
@@ -144,5 +147,6 @@ describe('AiExtractElementInfo prompt assembly', () => {
         }),
       ],
     });
+    expect(resizeImgBase64).not.toHaveBeenCalled();
   });
 });

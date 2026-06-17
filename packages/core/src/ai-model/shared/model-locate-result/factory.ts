@@ -1,5 +1,9 @@
 import { createLocateResultPromptSpec } from '../../prompts/locate-result-coordinates';
-import { finalizePixelBbox, finalizeSectionLocatePixelBboxGroup } from './bbox';
+import {
+  finalizePixelBbox,
+  finalizeSectionLocatePixelBboxGroup,
+  maxPixelIndex,
+} from './bbox';
 import { parseNumericLocateResult } from './parse';
 import { mapLocateResultToPixelBboxByCoordinates } from './pixel-bbox-mapper';
 import type {
@@ -71,36 +75,210 @@ function pickRawLocateValue(
   return extractFirstObjectField(input, fields);
 }
 
+function pointFallbackCoordinates(
+  resolvedCoordinates: ResolvedLocateResultCoordinates,
+): ResolvedLocateResultCoordinates {
+  return {
+    shape: 'point',
+    order: resolvedCoordinates.order,
+    normalizedBy: resolvedCoordinates.normalizedBy,
+  };
+}
+
+function extractRawLocateValueWithCoordinates(
+  input: unknown,
+  resolvedCoordinates: ResolvedLocateResultCoordinates,
+  purpose: RawLocateValuePurpose,
+):
+  | {
+      rawValue: unknown;
+      coordinates: ResolvedLocateResultCoordinates;
+    }
+  | undefined {
+  const pickedRawResult = pickRawLocateValue(
+    input,
+    resolvedCoordinates,
+    purpose,
+  );
+  if (pickedRawResult !== undefined) {
+    return {
+      rawValue: pickedRawResult,
+      coordinates: resolvedCoordinates,
+    };
+  }
+
+  if (resolvedCoordinates.shape !== 'point') {
+    const fallbackCoordinates = pointFallbackCoordinates(resolvedCoordinates);
+    const pickedPoint = pickRawLocateValue(input, fallbackCoordinates, purpose);
+    if (pickedPoint !== undefined) {
+      return {
+        rawValue: pickedPoint,
+        coordinates: fallbackCoordinates,
+      };
+    }
+  }
+
+  return undefined;
+}
+
 function extractPrimaryRawLocateValue(
   input: unknown,
   resolvedCoordinates: ResolvedLocateResultCoordinates,
-): unknown {
-  const pickedRawResult = pickRawLocateValue(
+): {
+  rawValue: unknown;
+  coordinates: ResolvedLocateResultCoordinates;
+} {
+  const pickedRawResult = extractRawLocateValueWithCoordinates(
     input,
     resolvedCoordinates,
     'primary',
   );
-  if (
-    pickedRawResult === undefined &&
-    input !== null &&
-    typeof input === 'object' &&
-    !Array.isArray(input)
-  ) {
-    throw new Error(
-      'locate response does not contain a recognizable locate result field',
-    );
+  if (pickedRawResult !== undefined) {
+    return pickedRawResult;
   }
 
-  return pickedRawResult === undefined ? input : pickedRawResult;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return {
+      rawValue: input,
+      coordinates: resolvedCoordinates,
+    };
+  }
+
+  throw new Error(
+    'locate response does not contain a recognizable locate result field',
+  );
 }
 
 function extractReferenceRawLocateValues(
   input: unknown,
   resolvedCoordinates: ResolvedLocateResultCoordinates,
-): unknown[] {
-  return normalizeReferenceResults(
-    pickRawLocateValue(input, resolvedCoordinates, 'references'),
+): Array<{
+  rawValue: unknown;
+  coordinates: ResolvedLocateResultCoordinates;
+}> {
+  const pickedReferences = extractRawLocateValueWithCoordinates(
+    input,
+    resolvedCoordinates,
+    'references',
   );
+
+  return normalizeReferenceResults(pickedReferences?.rawValue).map(
+    (rawValue) => ({
+      rawValue,
+      coordinates: pickedReferences?.coordinates ?? resolvedCoordinates,
+    }),
+  );
+}
+
+function parseRawLocateValueByCoordinates(
+  input: unknown,
+  coordinates: ResolvedLocateResultCoordinates,
+  customParser?: StandardLocateResultAdapterDefinition['parseRawLocateValue'],
+) {
+  return customParser
+    ? customParser(input)
+    : parseNumericLocateResult(coordinates, input);
+}
+
+function createDefaultPixelBboxMapper(
+  config: StandardLocateResultAdapterDefinition,
+  resolvedCoordinates: ResolvedLocateResultCoordinates,
+) {
+  return (rawValue: unknown, ctx: LocateResultContext) =>
+    mapLocateResultToPixelBboxByCoordinates(
+      parseRawLocateValueByCoordinates(
+        rawValue,
+        resolvedCoordinates,
+        config.parseRawLocateValue,
+      ),
+      ctx,
+      resolvedCoordinates,
+    );
+}
+
+function createCustomPixelBboxMapper(
+  config: StandardLocateResultAdapterDefinition,
+  resolvedCoordinates: ResolvedLocateResultCoordinates,
+) {
+  return (rawValue: unknown, ctx: LocateResultContext) =>
+    config.mapLocateResultToPixelBbox!(
+      parseRawLocateValueByCoordinates(
+        rawValue,
+        resolvedCoordinates,
+        config.parseRawLocateValue,
+      ),
+      ctx,
+    );
+}
+
+function mapPointFallbackToOnePixelBbox(
+  rawValue: unknown,
+  resolvedCoordinates: ResolvedLocateResultCoordinates,
+  ctx: LocateResultContext,
+): PixelBbox {
+  const result = parseNumericLocateResult(resolvedCoordinates, rawValue);
+  if (result.type !== 'point') {
+    throw new Error(`invalid point data: ${JSON.stringify(rawValue)} `);
+  }
+
+  // Reuse the standard mapper's validation for coordinate range and order.
+  mapLocateResultToPixelBboxByCoordinates(result, ctx, resolvedCoordinates);
+
+  const [x, y] =
+    resolvedCoordinates.order === 'yx'
+      ? [result.coordinates[1], result.coordinates[0]]
+      : result.coordinates;
+  const pixelPoint: [number, number] =
+    resolvedCoordinates.normalizedBy === undefined
+      ? [Math.round(x), Math.round(y)]
+      : [
+          Math.round(
+            (x * maxPixelIndex(ctx.preparedSize.width)) /
+              resolvedCoordinates.normalizedBy,
+          ),
+          Math.round(
+            (y * maxPixelIndex(ctx.preparedSize.height)) /
+              resolvedCoordinates.normalizedBy,
+          ),
+        ];
+
+  return [pixelPoint[0], pixelPoint[1], pixelPoint[0], pixelPoint[1]];
+}
+
+function createRawLocateValuePixelBboxMapper(
+  config: StandardLocateResultAdapterDefinition,
+  resolvedCoordinates: ResolvedLocateResultCoordinates,
+) {
+  const defaultMapper = createDefaultPixelBboxMapper(
+    config,
+    resolvedCoordinates,
+  );
+  const customMapper = config.mapLocateResultToPixelBbox
+    ? createCustomPixelBboxMapper(config, resolvedCoordinates)
+    : undefined;
+
+  return (
+    rawResult: {
+      rawValue: unknown;
+      coordinates: ResolvedLocateResultCoordinates;
+    },
+    ctx: LocateResultContext,
+  ) => {
+    const isPointFallback =
+      resolvedCoordinates.shape !== 'point' &&
+      rawResult.coordinates.shape === 'point';
+    if (isPointFallback) {
+      return mapPointFallbackToOnePixelBbox(
+        rawResult.rawValue,
+        rawResult.coordinates,
+        ctx,
+      );
+    }
+
+    return customMapper
+      ? customMapper(rawResult.rawValue, ctx)
+      : defaultMapper(rawResult.rawValue, ctx);
+  };
 }
 
 function createStandardLocateResultAdapterImplementation(
@@ -109,22 +287,10 @@ function createStandardLocateResultAdapterImplementation(
   const resolvedCoordinates = resolveLocateResultCoordinates(
     config.coordinates,
   );
-  const parseRawLocateValue =
-    config.parseRawLocateValue ??
-    ((input) => parseNumericLocateResult(resolvedCoordinates, input));
-  const mapLocateResultToPixelBbox =
-    config.mapLocateResultToPixelBbox ??
-    ((result, ctx) =>
-      mapLocateResultToPixelBboxByCoordinates(
-        result,
-        ctx,
-        resolvedCoordinates,
-      ));
-
-  const mapRawLocateValueToPixelBbox = (
-    rawResult: unknown,
-    ctx: LocateResultContext,
-  ) => mapLocateResultToPixelBbox(parseRawLocateValue(rawResult), ctx);
+  const mapRawLocateValueToPixelBbox = createRawLocateValuePixelBboxMapper(
+    config,
+    resolvedCoordinates,
+  );
   // Keep error semantics out of the adapter: callers may preserve, ignore, or
   // fail fast on `error` / `errors`, while this layer only extracts coordinates.
   const adaptRawLocateInputToPixelBbox = (
