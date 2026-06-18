@@ -28,6 +28,7 @@ const DEFAULT_MAX_KNOWLEDGE_CHARS = 7000;
 const DEFAULT_LOG_KNOWLEDGE_CHARS = 1200;
 const DEFAULT_QUERY_MODEL_MAX_TOKENS = 192;
 const DEFAULT_MACDOM_CANDIDATE_LIMIT = 8;
+const DEFAULT_MACDOM_VISIBLE_TREE_MODEL_LIMIT = 160;
 const DEFAULT_MACDOM_USAGE_BBOX_TOLERANCE = 5;
 const DEFAULT_MACDOM_USAGE_POINT_TOLERANCE = 8;
 const DEFAULT_WIKI_MCP_SERVER = pathJoin(
@@ -1234,7 +1235,7 @@ function candidateValueVariants(value) {
 
   const variants = [];
   const parts = text
-    .split(/[\/>｜|:：\-–—_]+/g)
+    .split(/[\/>｜|:：\-–—_\s]+/g)
     .map((item) => normalizeCandidateValue(item))
     .filter((item) => item.length >= 2);
   if (parts.length > 1) variants.push(parts.at(-1));
@@ -1250,11 +1251,37 @@ function pushUniqueCandidate(candidates, candidate) {
   candidates.push(normalized);
 }
 
+function macdomCandidateSortPriority(candidate) {
+  const normalized = normalizeCandidate(candidate);
+  const field = Object.keys(normalized)[0] || '';
+  if (field === 'object_name') return 0;
+  if (field === 'xpath') return 1;
+  if (field === 'tool_tip') return 2;
+  if (field === 'text') return 3;
+  if (field === 'special') return 4;
+  if (field === 'class_name') return 5;
+  return 10;
+}
+
+function sortMacdomCandidatesBySpecificity(candidates) {
+  return candidates
+    .map((candidate, index) => ({
+      candidate,
+      priority: macdomCandidateSortPriority(candidate),
+      index,
+    }))
+    .sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+      return left.index - right.index;
+    })
+    .map(({ candidate }) => candidate);
+}
+
 function pushExpandedCandidate(candidates, candidate) {
   const normalized = normalizeCandidate(candidate);
   if (!Object.keys(normalized).length) return;
-
-  pushUniqueCandidate(candidates, normalized);
 
   const fieldPriority = [
     'object_name',
@@ -1274,6 +1301,26 @@ function pushExpandedCandidate(candidates, candidate) {
       }
     }
   }
+}
+
+function pushCandidateFallbacks(candidates, candidate) {
+  pushExpandedCandidate(candidates, candidate);
+}
+
+function normalizeSingleFieldCandidate(candidate) {
+  const normalized = normalizeCandidate(candidate);
+  const fieldPriority = [
+    'object_name',
+    'xpath',
+    'tool_tip',
+    'text',
+    'special',
+    'class_name',
+  ];
+  for (const field of fieldPriority) {
+    if (normalized[field]) return { [field]: normalized[field] };
+  }
+  return {};
 }
 
 function stripPromptNoise(value) {
@@ -1310,6 +1357,33 @@ function extractLastPathSegment(text) {
     .at(-1);
 }
 
+function pathSegmentLooksUsefulForMacdom(segment) {
+  const normalized = normalizeCandidateValue(segment);
+  if (normalized.length < 2) return false;
+  return ![
+    '页面控件',
+    '子控件',
+    '页面',
+    '子页面',
+    '控件',
+    '顶部栏',
+    '功能分组滚动区',
+  ].includes(normalized);
+}
+
+function extractUsefulPathSegments(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized.includes('/')) return [];
+  return [
+    ...new Set(
+      normalized
+        .split('/')
+        .map((item) => normalizeCandidateValue(item))
+        .filter(pathSegmentLooksUsefulForMacdom),
+    ),
+  ];
+}
+
 function extractMacdomCandidatesFromKnowledge(knowledge) {
   const text = String(knowledge || '');
   const exactCandidates = [];
@@ -1326,11 +1400,6 @@ function extractMacdomCandidatesFromKnowledge(knowledge) {
     pushUniqueCandidate(structuralCandidates, { class_name: match[1] });
   }
   for (const match of text.matchAll(
-    /\bcontrolType\s*(?:[=:：]|为)\s*([^\s,，;；)]+)/g,
-  )) {
-    pushUniqueCandidate(structuralCandidates, { class_name: match[1] });
-  }
-  for (const match of text.matchAll(
     /\btoolTip\s*(?:[=:：]|为)\s*["“]([^"”\n]+)["”]/g,
   )) {
     pushUniqueCandidate(structuralCandidates, { tool_tip: match[1] });
@@ -1340,7 +1409,14 @@ function extractMacdomCandidatesFromKnowledge(knowledge) {
   )) {
     pushUniqueCandidate(structuralCandidates, { tool_tip: match[1] });
   }
-  for (const match of text.matchAll(/控制类型\s*[=:：]\s*([^\n,，;；)]+)/g)) {
+  for (const match of text.matchAll(
+    /(?:父节点|父级|父控件|父容器)?\s*special\s*[=:：]\s*([^\s,，+＋;；)]+)/g,
+  )) {
+    pushUniqueCandidate(structuralCandidates, { special: match[1] });
+  }
+  for (const match of text.matchAll(
+    /(?:父节点|父级|父控件|父容器)?\s*special\s*(?:为|是)\s*([^\s,，+＋;；)]+)/g,
+  )) {
     pushUniqueCandidate(structuralCandidates, { special: match[1] });
   }
   for (const match of text.matchAll(
@@ -1351,20 +1427,29 @@ function extractMacdomCandidatesFromKnowledge(knowledge) {
   for (const match of text.matchAll(/路径[:：]\s*([^\n]+)/g)) {
     const segment = extractLastPathSegment(match[1]);
     if (segment) pushUniqueCandidate(exactCandidates, { text: segment });
+    for (const pathSegment of extractUsefulPathSegments(match[1])) {
+      pushUniqueCandidate(exactCandidates, { text: pathSegment });
+    }
   }
   for (const line of text.split(/\r?\n/)) {
     const segment = extractLastPathSegment(line);
     if (segment) pushUniqueCandidate(exactCandidates, { text: segment });
+    for (const pathSegment of extractUsefulPathSegments(line)) {
+      pushUniqueCandidate(exactCandidates, { text: pathSegment });
+    }
   }
   for (const term of extractQuotedTerms(text)) {
     pushUniqueCandidate(exactCandidates, { text: term });
   }
 
   const candidates = [];
-  for (const candidate of [...exactCandidates, ...structuralCandidates]) {
-    pushUniqueCandidate(candidates, candidate);
+  for (const candidate of [...structuralCandidates].reverse()) {
+    pushCandidateFallbacks(candidates, candidate);
   }
-  return candidates;
+  for (const candidate of exactCandidates) {
+    pushCandidateFallbacks(candidates, candidate);
+  }
+  return sortMacdomCandidatesBySpecificity(candidates);
 }
 
 function extractMacdomCandidatesFromLocatePrompt(prompt) {
@@ -1381,6 +1466,26 @@ function extractMacdomCandidatesFromLocatePrompt(prompt) {
     pushUniqueCandidate(candidates, { text });
   }
   return candidates;
+}
+
+function macdomPromptTermValues(prompt, knowledge) {
+  const candidates = [
+    ...extractMacdomCandidatesFromKnowledge(knowledge),
+    ...extractMacdomCandidatesFromLocatePrompt(prompt),
+  ];
+  const values = [];
+  for (const candidate of candidates) {
+    for (const value of Object.values(normalizeCandidate(candidate))) {
+      if (value && !isGenericMacdomSearchValue(value)) values.push(value);
+      for (const variant of candidateValueVariants(value)) {
+        if (!isGenericMacdomSearchValue(variant)) values.push(variant);
+      }
+    }
+  }
+  for (const term of extractQuotedTerms(`${prompt}\n${knowledge || ''}`)) {
+    if (!isGenericMacdomSearchValue(term)) values.push(term);
+  }
+  return [...new Set(values)].slice(0, 80);
 }
 
 function normalizeModelCandidateKey(key) {
@@ -1413,13 +1518,11 @@ function pushMacdomModelCandidate(candidates, value) {
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
 
-  const candidate = {};
   for (const [key, itemValue] of Object.entries(value)) {
     const normalizedKey = normalizeModelCandidateKey(key);
     if (!normalizedKey) continue;
-    candidate[normalizedKey] = itemValue;
+    pushCandidateFallbacks(candidates, { [normalizedKey]: itemValue });
   }
-  pushUniqueCandidate(candidates, candidate);
 }
 
 function parseMacdomCandidatesFromModelContent(content, limit) {
@@ -1440,6 +1543,147 @@ function parseMacdomCandidatesFromModelContent(content, limit) {
   }
 }
 
+function parseJsonObjectFromModelContent(content) {
+  const raw = String(content || '').trim();
+  if (!raw) return undefined;
+  const jsonText = raw.match(/\{[\s\S]*\}/)?.[0] || raw;
+  try {
+    const parsed = JSON.parse(jsonText);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeMacdomDecisionLocator(locator) {
+  if (!locator || typeof locator !== 'object' || Array.isArray(locator)) {
+    return {};
+  }
+  const normalized = {};
+  for (const [key, value] of Object.entries(locator)) {
+    const normalizedKey = normalizeModelCandidateKey(key);
+    if (!normalizedKey) continue;
+    normalized[normalizedKey] = value;
+  }
+  return normalizeSingleFieldCandidate(normalized);
+}
+
+function normalizeMacdomDecision(data) {
+  if (!data) return undefined;
+  if (data.skip || data.no_target || data.noTarget) {
+    return { skip: true, reason: data.reason || data.current_state || '' };
+  }
+  const locator = normalizeMacdomDecisionLocator(data.locator || data);
+  if (!Object.keys(locator).length) return undefined;
+
+  const nodeId = Number(data.node_id ?? data.nodeId ?? data.id);
+  return {
+    nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
+    locator,
+    nextAction:
+      data.next_action || data.nextAction || data.target || data.reason || '',
+    reason: data.reason || data.current_state || '',
+  };
+}
+
+function buildMacdomCurrentStepPrompt(
+  prompt,
+  options,
+  visibleNodes,
+  rejection,
+) {
+  const knowledge = options.latestPlanningContext?.knowledge || '';
+  return [
+    '你是 Midscene MacDOM 当前界面下一步定位器。',
+    '你需要根据用户目标、kbgraph 给出的目标路径/操作步骤，以及当前 MacDOM 可见节点，判断当前界面下一步应该操作哪个可见控件。',
+    '重要规则：',
+    '- 先判断当前界面处在目标路径的哪一层；不要直接选择知识库最终控件，除非它已经在当前可见节点中。',
+    '- 只能从“当前可见 MacDOM 节点”中选择一个下一步可操作控件。',
+    '- 如果知识库最终控件已经在当前可见节点中，必须选择最终控件；只有最终控件不可见时，才选择导航/分组/展开控件。',
+    '- 打开或点击类任务不要选择 Label/IconLabel/QLabel/QSvgWidget/QFrame、HeaderState、HeaderTitle 这类标题/状态/图标节点。',
+    '- 对“打开 X 手动涂抹”这类任务，若存在 special=X 且 toolTip=手动涂抹 的 TsSliderHeaderOperator，应选择该局部工具入口，而不是 X 分组标题、展开状态图标或重置按钮。',
+    '- locator 必须是单字段对象，只能包含 text、object_name、tool_tip、special、class_name、xpath 中的一个字段。',
+    '- 不要把 object_name 和 text/special/class_name 组合成同一个 locator。',
+    '- 如果存在多个相同 objectName，优先返回对应节点 id，并选一个能唯一匹配该节点的单字段 locator；无法确定就返回 skip。',
+    '- 如果当前可见节点里没有可靠下一步目标，返回 {"skip":true,"reason":"..."}。',
+    rejection ? `上一次选择已被拒绝：${rejection}` : '',
+    '输出 JSON，不要 Markdown，不要解释：',
+    '{"node_id":123,"next_action":"点击眼睛增强分组","locator":{"text":"眼睛增强"},"reason":"当前可见分组，下一步需展开"}',
+    '',
+    `用户目标：${prompt}`,
+    '',
+    `kbgraph 知识：${knowledge || '(none)'}`,
+    '',
+    `当前可见 MacDOM 节点（已按相关性截断）：${JSON.stringify(visibleNodes)}`,
+  ].join('\n');
+}
+
+async function chooseMacdomCurrentStepWithModel(
+  prompt,
+  options,
+  visibleNodes,
+  rejection,
+) {
+  if (!options.macdomCandidateModelEnabled) return undefined;
+  if (!visibleNodes.length) return undefined;
+
+  const model =
+    options.macdomCandidateModel ||
+    options.queryTermModel ||
+    options.model ||
+    'qwen3-vl:8b-instruct-q4_K_M';
+  const response = await fetch(
+    buildTargetUrl(options.target, '/v1/chat/completions'),
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer local',
+      },
+      signal: AbortSignal.timeout(options.timeoutMs),
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: buildMacdomCurrentStepPrompt(
+              prompt,
+              options,
+              visibleNodes,
+              rejection,
+            ),
+          },
+        ],
+        temperature: 0,
+        top_p: 1,
+        stream: false,
+        max_tokens: options.queryTermModelMaxTokens,
+      }),
+    },
+  );
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `macdom current-step model failed (${response.status}): ${text.slice(0, 300)}`,
+    );
+  }
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `macdom current-step model returned non-JSON: ${text.slice(0, 300)}`,
+    );
+  }
+
+  const content = data?.choices?.[0]?.message?.content || '';
+  return normalizeMacdomDecision(parseJsonObjectFromModelContent(content));
+}
+
 function buildMacdomCandidateModelPrompt(prompt, options) {
   const knowledge = options.latestPlanningContext?.knowledge || '';
   return [
@@ -1450,8 +1694,10 @@ function buildMacdomCandidateModelPrompt(prompt, options) {
     '- 数组项只能是字符串或对象。',
     '- 字符串会作为 text 候选。',
     '- 对象只允许字段：text, object_name, class_name, tool_tip, special, xpath。',
-    '- objectName/className/toolTip/controlType 等知识库字段要转成 object_name/class_name/tool_tip。',
-    '- 同一个对象里的多个字段是 AND 匹配；不确定时拆成多个单字段候选。',
+    '- 每个对象必须只有一个字段；不要把 object_name 和 text/special/class_name 放进同一个对象。',
+    '- MacDOM 会先按单字段召回，再用其它线索过滤/排序；候选本身不要表达 AND 条件。',
+    '- objectName/className/toolTip/special 等知识库字段要转成 object_name/class_name/tool_tip/special。',
+    '- controlType/控制类型 只是控件类型说明，不要转成 MacDOM locator 字段。',
     '- 优先给真实短控件名/选项名，例如“顶部按钮-传输列表”应补充“传输列表”。',
     '- 去掉动作词和泛化位置词，例如点击、打开、选择、顶部、按钮、列表、区域、界面，除非它们本身就是控件文字的一部分。',
     `- 最多 ${options.macdomCandidateLimit} 个，按最可能命中的顺序排列。`,
@@ -1561,14 +1807,15 @@ async function buildMacdomLocateCandidates(prompt, options) {
     });
   }
   const candidates = [];
-  for (const candidate of [
+  const primaryCandidates = [
     ...modelCandidates,
     ...knowledgeCandidates,
     ...promptCandidates,
-  ]) {
-    pushExpandedCandidate(candidates, candidate);
+  ];
+  for (const candidate of primaryCandidates) {
+    pushCandidateFallbacks(candidates, candidate);
   }
-  return candidates;
+  return sortMacdomCandidatesBySpecificity(candidates);
 }
 
 function macdomPythonCommand(options) {
@@ -1683,6 +1930,7 @@ function parseMacdomVisibleTreeNodes(xml) {
     }
 
     nodes.push({
+      id: nodes.length + 1,
       tag,
       objectName: attributes.objectName,
       className: attributes.className,
@@ -1692,11 +1940,89 @@ function parseMacdomVisibleTreeNodes(xml) {
       visible: macdomStringLooksVisible(
         attributes.isInVisibleRect ?? attributes.visible,
       ),
+      enabled: macdomStringLooksVisible(attributes.enabled),
       bounds,
     });
     match = tagPattern.exec(String(xml || ''));
   }
   return nodes;
+}
+
+function macdomNodeSearchText(node) {
+  return [
+    node.text,
+    node.toolTip,
+    node.special,
+    node.objectName,
+    node.className,
+    node.tag,
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function macdomNodeModelScore(node, terms) {
+  let score = 0;
+  const haystack = normalizeMacdomSearchText(macdomNodeSearchText(node));
+  for (const term of terms) {
+    const needle = normalizeMacdomSearchText(term);
+    if (!needle) continue;
+    if (haystack === needle) score += 100;
+    else if (haystack.includes(needle)) score += 30;
+  }
+  if (node.objectName) score += 8;
+  if (node.text || node.toolTip || node.special) score += 6;
+  const area = node.bounds.width * node.bounds.height;
+  if (area > 0 && area < 20_000) score += 4;
+  if (area > 200_000) score -= 10;
+  return score;
+}
+
+function compactMacdomNodeForModel(node) {
+  const item = {
+    id: node.id,
+    tag: node.tag,
+    objectName: node.objectName,
+    className: node.className,
+    text: node.text,
+    toolTip: node.toolTip,
+    special: node.special,
+    enabled: node.enabled,
+    actionRole: macdomNodeLooksDecorative(node)
+      ? 'decorative'
+      : 'candidate-action',
+    bounds: node.bounds,
+  };
+  return Object.fromEntries(
+    Object.entries(item).filter(
+      ([, value]) => value !== undefined && value !== null && value !== '',
+    ),
+  );
+}
+
+function summarizeMacdomVisibleTreeForModel(nodes, prompt, knowledge, limit) {
+  const terms = macdomPromptTermValues(prompt, knowledge);
+  return [...nodes]
+    .filter((node) => node.visible)
+    .map((node, index) => ({
+      node,
+      index,
+      score: macdomNodeModelScore(node, terms),
+    }))
+    .filter(
+      (item) =>
+        item.score > 0 ||
+        item.node.text ||
+        item.node.toolTip ||
+        item.node.special ||
+        item.node.objectName,
+    )
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.index - right.index;
+    })
+    .slice(0, limit)
+    .map(({ node }) => compactMacdomNodeForModel(node));
 }
 
 function macdomStringLooksVisible(value) {
@@ -1713,21 +2039,26 @@ function normalizeMacdomSearchText(value) {
     .toLowerCase();
 }
 
-function macdomCandidateSearchValues(candidate) {
-  const values = [];
+function macdomCandidateSearchGroups(candidate) {
+  const groups = [];
   for (const [field, value] of Object.entries(normalizeCandidate(candidate))) {
     if (!value) continue;
-    values.push({ field, value });
+    const values = [value];
     if (['text', 'tool_tip', 'special'].includes(field)) {
       for (const variant of candidateValueVariants(value)) {
-        values.push({ field, value: variant });
+        values.push(variant);
       }
     }
+    const searchableValues = [...new Set(values)].filter((item) => {
+      if (!item) return false;
+      if (['object_name', 'class_name', 'xpath'].includes(field)) return true;
+      return !isGenericMacdomSearchValue(item);
+    });
+    if (searchableValues.length) {
+      groups.push({ field, values: searchableValues });
+    }
   }
-  return values.filter(({ field, value }) => {
-    if (['object_name', 'class_name', 'xpath'].includes(field)) return true;
-    return !isGenericMacdomSearchValue(value);
-  });
+  return groups;
 }
 
 function isGenericMacdomSearchValue(value) {
@@ -1746,7 +2077,7 @@ function isGenericMacdomSearchValue(value) {
   ].includes(normalized);
 }
 
-function macdomNodeFieldValues(node, field) {
+function macdomNodeFieldValues(node, field, strict = false) {
   const allSearchable = [
     node.text,
     node.toolTip,
@@ -1757,46 +2088,149 @@ function macdomNodeFieldValues(node, field) {
   ];
   if (field === 'object_name') return [node.objectName];
   if (field === 'class_name') return [node.className, node.tag];
+  if (strict) {
+    if (field === 'tool_tip') return [node.toolTip];
+    if (field === 'special') return [node.special];
+    if (field === 'text') return [node.text];
+  }
   if (field === 'tool_tip') return [node.toolTip, ...allSearchable];
   if (field === 'special') return [node.special, ...allSearchable];
   if (field === 'text') return allSearchable;
   return [];
 }
 
-function scoreMacdomNodeMatch(node, candidate) {
+function macdomFieldMatchScore(field, exact) {
+  if (field === 'object_name') return exact ? 120 : 80;
+  if (field === 'class_name') return exact ? 70 : 35;
+  if (field === 'special') return exact ? 95 : 60;
+  if (field === 'tool_tip') return exact ? 80 : 45;
+  return exact ? 60 : 35;
+}
+
+function scoreMacdomNodeFields(node, groups, { strict = false } = {}) {
   let score = 0;
   const matches = [];
-  for (const { field, value } of macdomCandidateSearchValues(candidate)) {
-    const needle = normalizeMacdomSearchText(value);
-    if (!needle) continue;
+  const missingFields = [];
+  for (const { field, values } of groups) {
+    let bestMatch;
 
-    for (const nodeValue of macdomNodeFieldValues(node, field)) {
-      const haystack = normalizeMacdomSearchText(nodeValue);
-      if (!haystack) continue;
+    for (const value of values) {
+      const needle = normalizeMacdomSearchText(value);
+      if (!needle) continue;
 
-      const exact = haystack === needle;
-      const contains = haystack.includes(needle);
-      if (!exact && !contains) continue;
+      for (const nodeValue of macdomNodeFieldValues(node, field, strict)) {
+        const haystack = normalizeMacdomSearchText(nodeValue);
+        if (!haystack) continue;
 
-      const fieldScore =
-        field === 'object_name'
-          ? exact
-            ? 120
-            : 80
-          : field === 'class_name'
-            ? exact
-              ? 70
-              : 35
-            : exact
-              ? 60
-              : 35;
-      score = Math.max(score, fieldScore);
-      matches.push({ field, value, nodeValue, exact });
-      break;
+        const exact = haystack === needle;
+        const contains = haystack.includes(needle);
+        if (!exact && !contains) continue;
+
+        const fieldScore = macdomFieldMatchScore(field, exact);
+        if (!bestMatch || fieldScore > bestMatch.score) {
+          bestMatch = { field, value, nodeValue, exact, score: fieldScore };
+        }
+      }
     }
+
+    if (!bestMatch) {
+      missingFields.push(field);
+      continue;
+    }
+    score += bestMatch.score;
+    matches.push({
+      field: bestMatch.field,
+      value: bestMatch.value,
+      nodeValue: bestMatch.nodeValue,
+      exact: bestMatch.exact,
+    });
   }
 
-  return { score, matches };
+  return {
+    score,
+    matches,
+    fieldCount: groups.length,
+    missingFields,
+  };
+}
+
+function scoreMacdomNodeMatch(node, candidate) {
+  const groups = macdomCandidateSearchGroups(candidate);
+  const result = scoreMacdomNodeFields(node, groups);
+  if (result.missingFields.length) {
+    return { score: 0, matches: [], fieldCount: groups.length };
+  }
+  return result;
+}
+
+function macdomRecallFieldPriority(field) {
+  if (field === 'object_name') return 0;
+  if (field === 'xpath') return 1;
+  if (field === 'tool_tip') return 2;
+  if (field === 'text') return 3;
+  if (field === 'special') return 4;
+  if (field === 'class_name') return 5;
+  return 10;
+}
+
+function chooseMacdomRecallGroup(groups) {
+  return [...groups].sort((left, right) => {
+    const priorityDiff =
+      macdomRecallFieldPriority(left.field) -
+      macdomRecallFieldPriority(right.field);
+    if (priorityDiff !== 0) return priorityDiff;
+    return right.values.join('').length - left.values.join('').length;
+  })[0];
+}
+
+function fieldMatchesMacdomNode(node, group) {
+  return scoreMacdomNodeFields(node, [group]).score > 0;
+}
+
+function findMacdomNodeById(nodes, id) {
+  if (!Number.isFinite(Number(id))) return undefined;
+  return nodes.find((node) => Number(node.id) === Number(id));
+}
+
+function locatorMatchesMacdomNode(node, locator) {
+  const groups = macdomCandidateSearchGroups(locator);
+  if (!groups.length) return false;
+  return (
+    scoreMacdomNodeFields(node, groups, { strict: true }).missingFields
+      .length === 0
+  );
+}
+
+function macdomNodeLooksDecorative(node) {
+  const signature = normalizeMacdomSearchText(
+    [node.tag, node.objectName, node.className].filter(Boolean).join(' '),
+  );
+  return /(?:label|iconlabel|svgwidget|qframe|separator|headerstate|headertitle|warnicon)/i.test(
+    signature,
+  );
+}
+
+function macdomPromptLooksLikeClickTask(prompt, knowledge = '') {
+  return /点击|打开|选择|进入|切换|tap|click|open|select/i.test(
+    `${prompt}\n${knowledge}`,
+  );
+}
+
+function macdomDecisionRejectionReason(node, decision, prompt, options) {
+  if (!node) return 'node_id_not_found';
+  if (!locatorMatchesMacdomNode(node, decision.locator)) {
+    return `locator_does_not_match_selected_node: node ${node.id} 的真实字段为 ${JSON.stringify(compactMacdomNodeForModel(node))}`;
+  }
+  if (
+    macdomPromptLooksLikeClickTask(
+      prompt,
+      options.latestPlanningContext?.knowledge || '',
+    ) &&
+    macdomNodeLooksDecorative(node)
+  ) {
+    return `selected_node_is_decorative: node ${node.id} 是标题/状态/图标节点 ${JSON.stringify(compactMacdomNodeForModel(node))}`;
+  }
+  return '';
 }
 
 function macdomNodeToPayload(node, candidate, matchMode, score, matches) {
@@ -1814,6 +2248,25 @@ function macdomNodeToPayload(node, candidate, matchMode, score, matches) {
       special: node.special,
       visible: node.visible,
       bounds: node.bounds,
+    },
+  };
+}
+
+function macdomNodeToDecisionPayload(node, decision) {
+  const groups = macdomCandidateSearchGroups(decision.locator);
+  const result = scoreMacdomNodeFields(node, groups, { strict: true });
+  return {
+    ...macdomNodeToPayload(
+      node,
+      decision.locator,
+      'visible-tree-model-current-step',
+      result.score,
+      result.matches,
+    ),
+    decision: {
+      nodeId: decision.nodeId,
+      nextAction: decision.nextAction,
+      reason: decision.reason,
     },
   };
 }
@@ -1844,19 +2297,46 @@ async function fetchMacdomVisibleTreeNodes(options, queryContext) {
 
 async function queryMacdomCandidateBuiltin(candidate, options, queryContext) {
   const nodes = await fetchMacdomVisibleTreeNodes(options, queryContext);
+  const groups = macdomCandidateSearchGroups(candidate);
+  if (!groups.length) {
+    return {
+      success: false,
+      locator: candidate,
+      error: 'No usable visible-tree locator fields',
+    };
+  }
+
+  const recallGroup = chooseMacdomRecallGroup(groups);
+  const filterGroups = groups.filter((group) => group !== recallGroup);
   const matches = [];
   for (const node of nodes) {
     if (!node.visible) continue;
-    const result = scoreMacdomNodeMatch(node, candidate);
+    if (!fieldMatchesMacdomNode(node, recallGroup)) continue;
+
+    const result = scoreMacdomNodeFields(node, groups);
+    if (filterGroups.length && result.missingFields.length) {
+      continue;
+    }
     if (result.score <= 0) continue;
     matches.push({ node, ...result });
   }
 
   if (!matches.length) {
+    const recalledCount = nodes.filter(
+      (node) => node.visible && fieldMatchesMacdomNode(node, recallGroup),
+    ).length;
     return {
       success: false,
       locator: candidate,
-      error: 'No visible-tree node matched locator by contains',
+      matchMode: recalledCount ? 'visible-tree-filter-miss' : undefined,
+      error: recalledCount
+        ? 'Visible-tree recall matched nodes, but filters removed all candidates'
+        : 'No visible-tree node matched locator by contains',
+      recall: {
+        field: recallGroup.field,
+        values: recallGroup.values,
+        count: recalledCount,
+      },
     };
   }
 
@@ -1868,13 +2348,39 @@ async function queryMacdomCandidateBuiltin(candidate, options, queryContext) {
   });
 
   const hit = matches[0];
+  const topMatches = matches.filter((match) => match.score === hit.score);
+  if (hit.fieldCount <= 1 && topMatches.length > 1) {
+    return {
+      success: false,
+      locator: candidate,
+      matchMode: 'visible-tree-ambiguous',
+      error: 'Ambiguous visible-tree match for single-field locator',
+      matches: topMatches.slice(0, 5).map((match) => ({
+        score: match.score,
+        props: {
+          objectName: match.node.objectName,
+          className: match.node.className || match.node.tag,
+          text: match.node.text || '',
+          toolTip: match.node.toolTip,
+          special: match.node.special,
+          visible: match.node.visible,
+          bounds: match.node.bounds,
+        },
+        matches: match.matches,
+      })),
+    };
+  }
   const exactObjectName = hit.matches.some(
     (match) => match.field === 'object_name' && match.exact,
   );
   return macdomNodeToPayload(
     hit.node,
     candidate,
-    exactObjectName ? 'visible-tree-exact' : 'visible-tree-contains',
+    filterGroups.length
+      ? 'visible-tree-recall-filter'
+      : exactObjectName
+        ? 'visible-tree-exact'
+        : 'visible-tree-contains',
     hit.score,
     hit.matches,
   );
@@ -2306,6 +2812,198 @@ function logMacdomPlanningUsage(options, responseText, macdomPlanningHit) {
 }
 
 async function resolveMacdomHit(prompt, imageSize, options, logPrefix) {
+  const queryContext = {};
+  if (logPrefix === 'macdom planning' && options.macdomMode !== 'python') {
+    if (!options.macdomCandidateModelEnabled) {
+      logRequest(options, 'macdom current-step skipped', {
+        prompt,
+        reason: 'model_disabled',
+      });
+      return undefined;
+    }
+
+    try {
+      const nodes = await fetchMacdomVisibleTreeNodes(options, queryContext);
+      const visibleNodes = summarizeMacdomVisibleTreeForModel(
+        nodes,
+        prompt,
+        options.latestPlanningContext?.knowledge || '',
+        DEFAULT_MACDOM_VISIBLE_TREE_MODEL_LIMIT,
+      );
+      if (options.macdomDebug) {
+        logRequest(options, 'macdom current-step visible tree', {
+          prompt,
+          nodeCount: nodes.length,
+          modelNodeCount: visibleNodes.length,
+          nodes: visibleNodes.slice(0, 30),
+        });
+      }
+
+      let rejection = '';
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const decision = await chooseMacdomCurrentStepWithModel(
+          prompt,
+          options,
+          visibleNodes,
+          rejection,
+        );
+        if (decision?.skip) {
+          logRequest(options, 'macdom current-step skipped', {
+            prompt,
+            reason: decision.reason,
+            attempt,
+          });
+          return undefined;
+        }
+        if (!decision?.locator) {
+          logRequest(options, 'macdom current-step skipped', {
+            prompt,
+            reason: 'no_model_decision',
+            attempt,
+          });
+          return undefined;
+        }
+        logRequest(options, 'macdom current-step decision', {
+          prompt,
+          nodeId: decision.nodeId,
+          nextAction: decision.nextAction,
+          locator: decision.locator,
+          reason: decision.reason,
+          attempt,
+        });
+
+        const selectedNode = findMacdomNodeById(nodes, decision.nodeId);
+        const rejectionReason = macdomDecisionRejectionReason(
+          selectedNode,
+          decision,
+          prompt,
+          options,
+        );
+        if (!rejectionReason && selectedNode) {
+          const payload = macdomNodeToDecisionPayload(selectedNode, decision);
+          const bounds = extractMacdomBounds(payload);
+          if (payload?.success && macdomPayloadIsVisible(payload) && bounds) {
+            const coordinateSpace = resolveMacdomCoordinateSpace(
+              options,
+              imageSize,
+            );
+            const bbox = normalizeMacdomBoundsTo1000(
+              bounds,
+              imageSize,
+              coordinateSpace,
+            );
+            if (bbox) {
+              logRequest(options, `${logPrefix} hit`, {
+                prompt,
+                candidate: decision.locator,
+                nodeId: decision.nodeId,
+                nextAction: decision.nextAction,
+                bounds,
+                matchMode: payload?.matchMode,
+                matchedProps: payload?.props,
+                matches: payload?.matches,
+                coordinateSpace,
+                bbox,
+                attempt,
+              });
+              return {
+                candidate: decision.locator,
+                nodeId: decision.nodeId,
+                nextAction: decision.nextAction,
+                bounds,
+                matchMode: payload?.matchMode,
+                matchedProps: payload?.props,
+                coordinateSpace,
+                bbox,
+                attempt,
+              };
+            }
+          }
+        }
+
+        if (selectedNode || rejectionReason) {
+          logRequest(options, 'macdom current-step rejected', {
+            prompt,
+            nodeId: decision.nodeId,
+            locator: decision.locator,
+            reason: rejectionReason || 'invalid_selected_node',
+            selectedNode: selectedNode
+              ? compactMacdomNodeForModel(selectedNode)
+              : undefined,
+            attempt,
+          });
+          rejection = rejectionReason || 'invalid_selected_node';
+          continue;
+        }
+
+        const payload = await queryMacdomCandidate(
+          decision.locator,
+          options,
+          queryContext,
+        );
+        const bounds = extractMacdomBounds(payload);
+        if (payload?.success && macdomPayloadIsVisible(payload) && bounds) {
+          const coordinateSpace = resolveMacdomCoordinateSpace(
+            options,
+            imageSize,
+          );
+          const bbox = normalizeMacdomBoundsTo1000(
+            bounds,
+            imageSize,
+            coordinateSpace,
+          );
+          if (bbox) {
+            logRequest(options, `${logPrefix} hit`, {
+              prompt,
+              candidate: decision.locator,
+              nodeId: decision.nodeId,
+              nextAction: decision.nextAction,
+              bounds,
+              matchMode: payload?.matchMode,
+              matchedProps: payload?.props,
+              matches: payload?.matches,
+              coordinateSpace,
+              bbox,
+              attempt,
+            });
+            return {
+              candidate: decision.locator,
+              nodeId: decision.nodeId,
+              nextAction: decision.nextAction,
+              bounds,
+              matchMode: payload?.matchMode,
+              matchedProps: payload?.props,
+              coordinateSpace,
+              bbox,
+              attempt,
+            };
+          }
+        }
+
+        logRequest(options, 'macdom current-step rejected', {
+          prompt,
+          nodeId: decision.nodeId,
+          locator: decision.locator,
+          reason: 'locator_query_miss',
+          attempt,
+        });
+        rejection = 'locator_query_miss';
+      }
+
+      logRequest(options, 'macdom current-step skipped', {
+        prompt,
+        reason: 'model_decisions_rejected',
+      });
+      return undefined;
+    } catch (error) {
+      logRequest(options, 'macdom current-step model failed', {
+        prompt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
   const candidates = await buildMacdomLocateCandidates(prompt, options);
   if (options.macdomDebug) {
     logRequest(options, `${logPrefix} candidates`, {
@@ -2322,7 +3020,6 @@ async function resolveMacdomHit(prompt, imageSize, options, logPrefix) {
     return undefined;
   }
 
-  const queryContext = {};
   for (const candidate of candidates) {
     try {
       const payload = await queryMacdomCandidate(
@@ -2399,10 +3096,22 @@ async function resolveMacdomHit(prompt, imageSize, options, logPrefix) {
 
 function buildMacdomPlanningKnowledge(hit) {
   if (!hit) return '';
+  const matchedProps = hit.matchedProps || {};
+  const matchedPropText = [
+    matchedProps.objectName ? `objectName=${matchedProps.objectName}` : '',
+    matchedProps.className ? `className=${matchedProps.className}` : '',
+    matchedProps.text ? `text=${matchedProps.text}` : '',
+    matchedProps.toolTip ? `toolTip=${matchedProps.toolTip}` : '',
+    matchedProps.special ? `special=${matchedProps.special}` : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
   return [
     'MacDOM 当前界面实时定位到以下控件坐标。',
     hit.traceId ? `traceId: ${hit.traceId}` : '',
+    hit.nextAction ? `下一步: ${hit.nextAction}` : '',
     `候选: ${compactMacdomCandidate(hit.candidate)}`,
+    matchedPropText ? `命中控件: ${matchedPropText}` : '',
     hit.matchMode ? `MacDOM match mode: ${hit.matchMode}` : '',
     `bounds: x=${hit.bounds.x}, y=${hit.bounds.y}, width=${hit.bounds.width}, height=${hit.bounds.height}`,
     hit.coordinateSpace
@@ -2975,17 +3684,8 @@ async function buildWikiKnowledge(instruction, options, requestModel) {
 
 function buildClaudePrompt(instruction) {
   return [
-    '你是 Midscene 规划前的知识库查询器。',
-    '请只使用已配置的 kbgraph MCP 工具查询和总结，不要修改文件，不要执行项目命令。',
-    '目标：为后续视觉自动化规划提供高置信的页面路径、控件名称、定位信息、操作能力和注意事项。',
-    '如果直接查询为空，请自主选择更合适的 kbgraph 工具继续查询一次或多次，例如 fusion_query、ui_search_controls、ui_get_control、wiki_search。',
-    '输出要求：',
-    '- 只输出可注入给规划模型的简短中文知识摘要。',
-    '- 优先保留路径、控件名、objectName、text、controlType、abilities。',
-    '- 如果没有可靠命中，输出空字符串或“NO_RELEVANT_KNOWLEDGE”。',
-    '- 不要输出 Markdown 代码块，不要解释你的查询过程。',
-    '',
-    `用户指令：${instruction}`,
+    `使用kbgraph mcp UI工具查询如何${instruction}`,
+    '只输出简短中文操作信息。必须包含操作步骤、控件路径、控件名、objectName、text/controlType/abilities；如果第一次结果缺少 objectName，请继续用 kbgraph UI 工具查询补齐。不要修改文件，不要执行项目命令。',
   ].join('\n');
 }
 
@@ -3336,13 +4036,15 @@ async function enrichPlanningRequest(body, options, requestId) {
     logRequest(options, 'planning request passed without wiki knowledge', {
       instruction,
     });
-    options.latestPlanningContext = {
-      instruction,
-      terms: [],
-      knowledge: '',
-      candidates: [],
-      updatedAt: Date.now(),
-    };
+    if (options.latestPlanningContext?.instruction !== instruction) {
+      options.latestPlanningContext = {
+        instruction,
+        terms: [],
+        knowledge: '',
+        candidates: [],
+        updatedAt: Date.now(),
+      };
+    }
   }
 
   const macdomKnowledge = await buildMacdomPlanningKnowledgeFromBody(
